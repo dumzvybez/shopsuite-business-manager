@@ -33,7 +33,7 @@ import {
 
 import {
   formatDate, formatDateShort, formatDateLong, formatMonth,
-  formatNumber, formatCurrency, relativeDayLabel,
+  formatNumber, formatQuantity, formatQuantityWithUnit, formatCurrency, relativeDayLabel,
   SINHALA_MONTHS, SINHALA_DAYS, ENGLISH_MONTHS, ENGLISH_DAYS,
 } from './sinhala';
 
@@ -60,7 +60,7 @@ export {
   getAllStockMovements, getStockMovementsForCategory, getStockMovementsForProduct,
   todayStr, toDateStr, addDays, genId, PRODUCT_COLOR_PALETTE,
   formatDate, formatDateShort, formatDateLong, formatMonth,
-  formatNumber, formatCurrency, relativeDayLabel,
+  formatNumber, formatQuantity, formatQuantityWithUnit, formatCurrency, relativeDayLabel,
   SINHALA_MONTHS, SINHALA_DAYS, ENGLISH_MONTHS, ENGLISH_DAYS,
 };
 

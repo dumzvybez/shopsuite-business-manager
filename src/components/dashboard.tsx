@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import {
   TrendingUp, TrendingDown, Wallet, Coins, Truck, Users, Package,
-  AlertTriangle, Settings as SettingsIcon, ChevronRight, Crown, ArrowUpRight, ArrowDownRight, ShoppingBag,
-  Plus, Tag, Receipt, FileText,
+  AlertTriangle, Settings as SettingsIcon, ChevronRight, ChevronUp, ChevronDown, Crown,
+  ArrowUpRight, ArrowDownRight, ShoppingBag,
+  Plus, Tag, Receipt, FileText, Boxes, Pencil, Check,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell,
@@ -47,6 +48,36 @@ function greetingKey(): string {
   return 'greeting.night';
 }
 
+// Section IDs that can be reordered by the user.
+type SectionId = 'financials' | 'quickActions' | 'health' | 'todaySales' | 'inventory' | 'dues';
+const DEFAULT_ORDER: SectionId[] = ['financials', 'quickActions', 'health', 'todaySales', 'inventory', 'dues'];
+const ORDER_STORAGE_KEY = 'shopsuite-dashboard-order';
+
+function loadOrder(): SectionId[] {
+  if (typeof window === 'undefined') return DEFAULT_ORDER;
+  try {
+    const raw = localStorage.getItem(ORDER_STORAGE_KEY);
+    if (!raw) return DEFAULT_ORDER;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return DEFAULT_ORDER;
+    // Validate: must contain exactly the default IDs (no missing, no extra)
+    const set = new Set(parsed);
+    if (set.size !== DEFAULT_ORDER.length) return DEFAULT_ORDER;
+    for (const id of DEFAULT_ORDER) {
+      if (!set.has(id)) return DEFAULT_ORDER;
+    }
+    return parsed as SectionId[];
+  } catch {
+    return DEFAULT_ORDER;
+  }
+}
+
+function saveOrder(order: SectionId[]) {
+  try {
+    localStorage.setItem(ORDER_STORAGE_KEY, JSON.stringify(order));
+  } catch { /* ignore */ }
+}
+
 export function Dashboard({
   date, currency, onSeeAllReports, onSeeMonthlyReports,
   onNewSale, onAddStock, onSupplierPurchase, onCollectCredit, onAddExpense, onGenerateReport,
@@ -55,8 +86,10 @@ export function Dashboard({
 }: Props) {
   const { t } = useI18n();
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [monthSummary, setMonthSummary] = useState<MonthSummary | null>(null);
   const [last7, setLast7] = useState<{ date: string; profit: number; label: string }[]>([]);
+  const [view, setView] = useState<'today' | 'month'>('today');
+  const [editing, setEditing] = useState(false);
+  const [order, setOrder] = useState<SectionId[]>(loadOrder);
 
   useEffect(() => {
     (async () => {
@@ -79,391 +112,422 @@ export function Dashboard({
         chartData.push({ date: d, profit: salesByDate.get(d) || 0, label: String(dayNum) });
       }
       setLast7(chartData);
-
-      const month = today.slice(0, 7);
-      const ms = await getMonthSummary(month);
-      setMonthSummary(ms);
     })();
   }, [date]);
 
   const monthLabel = formatMonth(todayStr().slice(0, 7));
 
-  // Compute today vs yesterday comparison
-  const todayVsYesterday = stats && stats.yesterdayProfit !== null
-    ? {
-        diff: stats.todayProfit - stats.yesterdayProfit,
-        pct: stats.yesterdayProfit > 0 ? ((stats.todayProfit - stats.yesterdayProfit) / Math.abs(stats.yesterdayProfit)) * 100 : 0,
-        up: stats.todayProfit > stats.yesterdayProfit,
-      }
-    : null;
+  // ─── Business Health: uses NET profit (real business profit) ───
+  // Today vs yesterday (net profit)
+  const todayVsYesterday = useMemo(() => {
+    if (!stats) return null;
+    const todayNet = stats.todayNetProfit;
+    const yesterdayNet = stats.yesterdayNetProfit;
+    // If yesterday had no business activity at all (no sales), there's no meaningful baseline.
+    if (yesterdayNet === 0 && stats.yesterdayProfit === 0) {
+      return { todayNet, yesterdayNet, diff: todayNet, pct: null, up: todayNet > 0, noBaseline: true };
+    }
+    const diff = todayNet - yesterdayNet;
+    const pct = yesterdayNet !== 0 ? (diff / Math.abs(yesterdayNet)) * 100 : null;
+    return { todayNet, yesterdayNet, diff, pct, up: diff > 0, noBaseline: false };
+  }, [stats]);
 
-  // Compute month vs last month comparison
-  const monthVsLastMonth = stats && stats.lastMonthProfit !== null
-    ? {
-        diff: stats.monthProfit - stats.lastMonthProfit,
-        pct: stats.lastMonthProfit > 0 ? ((stats.monthProfit - stats.lastMonthProfit) / Math.abs(stats.lastMonthProfit)) * 100 : 0,
-        up: stats.monthProfit > stats.lastMonthProfit,
-      }
-    : null;
+  // Month vs last month (net profit)
+  const monthVsLastMonth = useMemo(() => {
+    if (!stats) return null;
+    const monthNet = stats.monthNetProfit;
+    const lastNet = stats.lastMonthNetProfit;
+    if (lastNet === 0 && stats.lastMonthProfit === 0) {
+      return { monthNet, lastNet, diff: monthNet, pct: null, up: monthNet > 0, noBaseline: true };
+    }
+    const diff = monthNet - lastNet;
+    const pct = lastNet !== 0 ? (diff / Math.abs(lastNet)) * 100 : null;
+    return { monthNet, lastNet, diff, pct, up: diff > 0, noBaseline: false };
+  }, [stats]);
+
+  // Values for the financial cards based on the Today/Month toggle
+  const financialValues = useMemo(() => {
+    if (!stats) return { cash: '—', gross: '—', net: '—', netNegative: false, grossNegative: false, cashNegative: false };
+    if (view === 'today') {
+      return {
+        cash: formatCurrency(stats.todaySales - (stats.monthExpenses > 0 ? 0 : 0), currency), // today cash = today sales (no today-expense split shown to keep it simple)
+        gross: formatCurrency(stats.todayProfit, currency),
+        net: formatCurrency(stats.todayNetProfit, currency),
+        netNegative: stats.todayNetProfit < 0,
+        grossNegative: stats.todayProfit < 0,
+        cashNegative: false,
+      };
+    }
+    return {
+      cash: formatCurrency(stats.cashAvailable, currency),
+      gross: formatCurrency(stats.grossProfit, currency),
+      net: formatCurrency(stats.netProfit, currency),
+      netNegative: stats.netProfit < 0,
+      grossNegative: stats.grossProfit < 0,
+      cashNegative: stats.cashAvailable < 0,
+    };
+  }, [stats, view, currency]);
+
+  // ─── Card reorder handlers ───
+  const moveSection = useCallback((id: SectionId, dir: 'up' | 'down') => {
+    setOrder((prev) => {
+      const idx = prev.indexOf(id);
+      if (idx === -1) return prev;
+      const newIdx = dir === 'up' ? idx - 1 : idx + 1;
+      if (newIdx < 0 || newIdx >= prev.length) return prev;
+      const next = [...prev];
+      [next[idx], next[newIdx]] = [next[newIdx], next[idx]];
+      saveOrder(next);
+      return next;
+    });
+  }, []);
+
+  const resetOrder = useCallback(() => {
+    setOrder(DEFAULT_ORDER);
+    saveOrder(DEFAULT_ORDER);
+  }, []);
+
+  // Render a section wrapper with optional edit-mode controls
+  const renderSection = (id: SectionId, content: React.ReactNode, delay = 0) => (
+    <motion.div
+      key={id}
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay }}
+      className={`relative ${editing ? 'ring-2 ring-amber-400/60 rounded-3xl' : ''}`}
+    >
+      {editing && (
+        <div className="absolute -top-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 glass-strong rounded-full px-2 py-1 shadow-lg">
+          <button
+            onClick={() => moveSection(id, 'up')}
+            className="w-6 h-6 rounded-full glass flex items-center justify-center text-stone-700 dark:text-amber-50 active:scale-90"
+            aria-label={t('dashboard.moveUp')}
+          >
+            <ChevronUp size={12} />
+          </button>
+          <button
+            onClick={() => moveSection(id, 'down')}
+            className="w-6 h-6 rounded-full glass flex items-center justify-center text-stone-700 dark:text-amber-50 active:scale-90"
+            aria-label={t('dashboard.moveDown')}
+          >
+            <ChevronDown size={12} />
+          </button>
+        </div>
+      )}
+      {content}
+    </motion.div>
+  );
+
+  // ─── Section renderers ───
+
+  const financialSection = (
+    <section className="space-y-3">
+      {/* Today / Month toggle */}
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold text-stone-600 dark:text-amber-100/70">
+          {view === 'today' ? t('dashboard.today') : t('dashboard.thisMonth')}
+        </p>
+        <div className="glass rounded-full p-0.5 flex">
+          <button
+            onClick={() => setView('today')}
+            className={`px-3 py-1 rounded-full text-[11px] font-bold transition-all ${
+              view === 'today' ? 'glass-primary text-white' : 'text-stone-600 dark:text-amber-100/70'
+            }`}
+          >
+            {t('dashboard.viewToday')}
+          </button>
+          <button
+            onClick={() => setView('month')}
+            className={`px-3 py-1 rounded-full text-[11px] font-bold transition-all ${
+              view === 'month' ? 'glass-primary text-white' : 'text-stone-600 dark:text-amber-100/70'
+            }`}
+          >
+            {t('dashboard.viewMonth')}
+          </button>
+        </div>
+      </div>
+
+      {/* Financial cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+        <FinCard
+          icon={<Wallet size={15} />}
+          label={t('dashboard.cashAvailable')}
+          value={financialValues.cash}
+          variant="success"
+          sub={view === 'month' ? t('dashboard.cashAvailableDesc') : undefined}
+        />
+        <FinCard
+          icon={<TrendingUp size={15} />}
+          label={t('dashboard.grossProfit')}
+          value={financialValues.gross}
+          variant={financialValues.grossNegative ? 'danger' : 'info'}
+        />
+        <FinCard
+          icon={<Coins size={15} />}
+          label={t('dashboard.netProfit')}
+          value={financialValues.net}
+          variant={financialValues.netNegative ? 'danger' : 'primary'}
+          sub={view === 'month' && stats ? `${t('expense.totalThisMonth')}: ${formatCurrency(stats.monthExpenses, currency)}` : undefined}
+        />
+      </div>
+    </section>
+  );
+
+  const quickActionsSection = (
+    <section className="glass rounded-2xl p-3">
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+        <QuickAction icon={<Plus size={16} />} label="New Sale" onClick={onNewSale} variant="primary" />
+        <QuickAction icon={<Package size={16} />} label="Add Stock" onClick={onAddStock} variant="info" />
+        <QuickAction icon={<Truck size={16} />} label="Supplier" onClick={onSupplierPurchase} variant="info" />
+        <QuickAction icon={<Receipt size={16} />} label="Collect" onClick={onCollectCredit} variant="success" />
+        <QuickAction icon={<Tag size={16} />} label="Expense" onClick={onAddExpense} variant="danger" />
+        <QuickAction icon={<FileText size={16} />} label="Report" onClick={onGenerateReport} variant="primary" />
+      </div>
+    </section>
+  );
+
+  const healthSection = stats && todayVsYesterday ? (
+    <section className="glass rounded-2xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-bold text-sm text-stone-800 dark:text-amber-50">{t('dashboard.netProfitHealth')}</h3>
+        <div className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+          stats.todayNetProfit < 0 ? 'glass-danger text-white' :
+          todayVsYesterday.up ? 'glass-success text-white' : 'glass text-stone-700 dark:text-amber-100'
+        }`}>
+          {stats.todayNetProfit < 0 ? t('dashboard.worstDay') :
+           todayVsYesterday.up ? t('dashboard.goodDay') : t('dashboard.slowDay')}
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2.5">
+        {/* Today vs Yesterday */}
+        <div className="glass rounded-xl p-2.5">
+          <p className="text-[10px] text-stone-500 dark:text-amber-100/60">{t('dashboard.vsYesterday')}</p>
+          {todayVsYesterday.noBaseline ? (
+            <>
+              <p className="text-sm font-bold text-stone-700 dark:text-amber-100">{formatCurrency(stats.todayNetProfit, currency)}</p>
+              <p className="text-[10px] text-amber-600 dark:text-amber-400">{t('dashboard.newBaseline')}</p>
+            </>
+          ) : (
+            <>
+              <p className={`text-sm font-bold ${todayVsYesterday.up ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                {todayVsYesterday.up ? '↑' : '↓'} {formatCurrency(Math.abs(todayVsYesterday.diff), currency)}
+              </p>
+              <p className="text-[10px] text-stone-500 dark:text-amber-100/50">
+                {todayVsYesterday.pct !== null ? `${todayVsYesterday.up ? '+' : ''}${todayVsYesterday.pct.toFixed(1)}%` : t('dashboard.noComparison')}
+              </p>
+            </>
+          )}
+        </div>
+        {/* Month vs Last Month */}
+        <div className="glass rounded-xl p-2.5">
+          <p className="text-[10px] text-stone-500 dark:text-amber-100/60">{t('dashboard.vsLastMonth')}</p>
+          {monthVsLastMonth && monthVsLastMonth.noBaseline ? (
+            <>
+              <p className="text-sm font-bold text-stone-700 dark:text-amber-100">{formatCurrency(stats.monthNetProfit, currency)}</p>
+              <p className="text-[10px] text-amber-600 dark:text-amber-400">{t('dashboard.newBaseline')}</p>
+            </>
+          ) : monthVsLastMonth ? (
+            <>
+              <p className={`text-sm font-bold ${monthVsLastMonth.up ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                {monthVsLastMonth.up ? '↑' : '↓'} {formatCurrency(Math.abs(monthVsLastMonth.diff), currency)}
+              </p>
+              <p className="text-[10px] text-stone-500 dark:text-amber-100/50">
+                {monthVsLastMonth.pct !== null ? `${monthVsLastMonth.up ? '+' : ''}${monthVsLastMonth.pct.toFixed(1)}%` : t('dashboard.noComparison')}
+              </p>
+            </>
+          ) : (
+            <p className="text-sm font-bold text-stone-500 dark:text-amber-100/60">—</p>
+          )}
+        </div>
+      </div>
+    </section>
+  ) : null;
+
+  const todaySalesSection = (
+    <section className="glass rounded-2xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="font-bold text-sm text-stone-800 dark:text-amber-50">{t('dashboard.todaySales')}</h3>
+          <p className="text-[10px] text-stone-500 dark:text-amber-100/60">{formatDateShort(date)}</p>
+        </div>
+        {todayVsYesterday && !todayVsYesterday.noBaseline && (
+          <div className={`px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-0.5 ${
+            todayVsYesterday.up ? 'glass-success text-white' : todayVsYesterday.diff < 0 ? 'glass-danger text-white' : 'glass text-stone-700 dark:text-amber-100'
+          }`}>
+            {todayVsYesterday.up ? <ArrowUpRight size={10} /> : <ArrowDownRight size={10} />}
+            {Math.abs(todayVsYesterday.diff) < 1 ? '—' : formatCurrency(Math.abs(todayVsYesterday.diff), currency)}
+          </div>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <MiniStat label={t('dashboard.todaySell')} value={stats ? formatCurrency(stats.todaySales, currency) : '—'} />
+        <MiniStat
+          label={t('dashboard.todayProfit')}
+          value={stats ? formatCurrency(stats.todayProfit, currency) : '—'}
+          negative={stats ? stats.todayProfit < 0 : false}
+        />
+        <MiniStat label={t('dashboard.todayEggs')} value={stats ? formatNumber(stats.todayItems) : '—'} />
+      </div>
+    </section>
+  );
+
+  const inventorySection = stats ? (
+    <section className="glass rounded-2xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white ${stats.outOfStockCount > 0 ? 'bg-amber-500' : 'glass-info'}`}>
+            <Package size={14} />
+          </div>
+          <div>
+            <h3 className="font-bold text-sm text-stone-800 dark:text-amber-50">{t('inventory.title')}</h3>
+            <p className="text-[10px] text-stone-500 dark:text-amber-100/60">
+              {stats.totalProducts} {t('dashboard.totalProducts').toLowerCase()} · {t('dashboard.stockValue')}: {formatCurrency(stats.stockValue, currency)}
+            </p>
+          </div>
+        </div>
+        <button onClick={onOpenInventory} className="text-[10px] text-amber-700 dark:text-amber-300 font-semibold flex items-center gap-0.5">
+          {t('dashboard.seeAll')} <ChevronRight size={10} />
+        </button>
+      </div>
+      {stats.outOfStockCount > 0 || stats.lowStockCount > 0 ? (
+        <div className="glass rounded-xl p-2.5 flex items-center gap-2">
+          <AlertTriangle size={12} className="text-amber-500 flex-shrink-0" />
+          <p className="text-[11px] text-stone-700 dark:text-amber-100">
+            {stats.outOfStockCount} {t('inventory.outOfStockCount')} · {stats.lowStockCount} {t('inventory.lowStockCount')}
+          </p>
+        </div>
+      ) : (
+        <p className="text-[11px] text-stone-500 dark:text-amber-100/60 text-center py-1.5">{t('dashboard.noStockAlerts')}</p>
+      )}
+    </section>
+  ) : null;
+
+  const duesSection = stats ? (
+    <section className="grid grid-cols-2 gap-2.5">
+      <button onClick={onOpenSuppliers} className="text-left active:scale-[0.98] transition-transform">
+        <div className="glass rounded-2xl p-3 h-full">
+          <div className="flex items-center gap-1.5 mb-1 opacity-80">
+            <Truck size={13} className="text-stone-600 dark:text-amber-100/70" />
+            <span className="text-[10px] text-stone-600 dark:text-amber-100/70">{t('dashboard.supplierPayments')}</span>
+          </div>
+          <p className={`text-base font-bold ${stats.supplierDue > 0 ? 'text-amber-700 dark:text-amber-400' : 'text-stone-800 dark:text-amber-50'}`}>
+            {formatCurrency(stats.supplierDue, currency)}
+          </p>
+          <p className="text-[9px] text-stone-500 dark:text-amber-100/50">{t('dashboard.outstandingAcross')}</p>
+        </div>
+      </button>
+      <button onClick={onOpenCredit} className="text-left active:scale-[0.98] transition-transform">
+        <div className="glass rounded-2xl p-3 h-full">
+          <div className="flex items-center gap-1.5 mb-1 opacity-80">
+            <Users size={13} className="text-stone-600 dark:text-amber-100/70" />
+            <span className="text-[10px] text-stone-600 dark:text-amber-100/70">{t('dashboard.customerDue')}</span>
+          </div>
+          <p className={`text-base font-bold ${stats.customerDue > 0 ? 'text-amber-700 dark:text-amber-400' : 'text-stone-800 dark:text-amber-50'}`}>
+            {formatCurrency(stats.customerDue, currency)}
+          </p>
+          <p className="text-[9px] text-stone-500 dark:text-amber-100/50">{t('dashboard.outstandingCredit')}</p>
+        </div>
+      </button>
+    </section>
+  ) : null;
+
+  // Map section IDs to rendered content
+  const sectionMap: Record<SectionId, React.ReactNode> = {
+    financials: financialSection,
+    quickActions: quickActionsSection,
+    health: healthSection,
+    todaySales: todaySalesSection,
+    inventory: inventorySection,
+    dues: duesSection,
+  };
+
+  let delayIdx = 0;
 
   return (
     <div className="app-shell pb-28">
       {/* Header */}
       <header className="glass-strong sticky top-0 z-30 safe-top">
-        <div className="px-4 py-3 flex items-center gap-3">
-          <div className="w-11 h-11 rounded-2xl overflow-hidden flex-shrink-0 shadow-lg">
-            <img src="/icons/icon-1024.png" alt="Shop Manager" className="w-full h-full object-cover" />
+        <div className="px-4 py-3 flex items-center gap-3 max-w-5xl mx-auto w-full">
+          <div className="w-10 h-10 rounded-2xl overflow-hidden flex-shrink-0 shadow-lg">
+            <img src="/icons/icon-1024.png" alt="ShopSuite" className="w-full h-full object-cover" />
           </div>
           <div className="flex-1 min-w-0">
             <h1 className="text-base font-bold text-stone-800 dark:text-amber-50 truncate">
               {shopName || t('app.name')}
             </h1>
-            <p className="text-xs text-stone-600 dark:text-amber-100/70 truncate">
+            <p className="text-[11px] text-stone-600 dark:text-amber-100/70 truncate">
               {t(greetingKey())}{ownerName ? `, ${ownerName}` : ''}
             </p>
           </div>
           <button
+            onClick={() => setEditing((e) => !e)}
+            className={`w-9 h-9 rounded-full flex items-center justify-center active:scale-90 transition-transform ${
+              editing ? 'glass-primary text-white' : 'glass text-stone-700 dark:text-amber-50'
+            }`}
+            aria-label={t('dashboard.customize')}
+          >
+            {editing ? <Check size={16} /> : <Pencil size={14} />}
+          </button>
+          <button
             onClick={onOpenSettings}
-            className="w-10 h-10 rounded-full glass flex items-center justify-center text-stone-700 dark:text-amber-50 active:scale-90 transition-transform"
+            className="w-9 h-9 rounded-full glass flex items-center justify-center text-stone-700 dark:text-amber-50 active:scale-90 transition-transform"
             aria-label={t('settings.title')}
           >
-            <SettingsIcon size={18} />
+            <SettingsIcon size={16} />
           </button>
         </div>
-      </header>
-
-      <main className="px-4 py-4 space-y-4 max-w-2xl mx-auto w-full">
-        {/* Quick Actions */}
-        <motion.section
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="glass-strong rounded-3xl p-4"
-        >
-          <p className="text-xs font-semibold text-stone-600 dark:text-amber-100/70 mb-3">Quick Actions</p>
-          <div className="grid grid-cols-3 gap-2">
-            <QuickAction icon={<Plus size={18} />} label="New Sale" onClick={onNewSale} variant="primary" />
-            <QuickAction icon={<Package size={18} />} label="Add Stock" onClick={onAddStock} variant="info" />
-            <QuickAction icon={<Truck size={18} />} label="Supplier" onClick={onSupplierPurchase} variant="info" />
-            <QuickAction icon={<Receipt size={18} />} label="Collect" onClick={onCollectCredit} variant="success" />
-            <QuickAction icon={<Tag size={18} />} label="Expense" onClick={onAddExpense} variant="danger" />
-            <QuickAction icon={<FileText size={18} />} label="Report" onClick={onGenerateReport} variant="primary" />
-          </div>
-        </motion.section>
-
-        {/* Top row: Cash Available + Gross Profit + Net Profit */}
-        <motion.section
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="grid grid-cols-2 gap-3"
-        >
-          <BigStat
-            icon={<Wallet size={18} />}
-            label={t('dashboard.cashAvailable')}
-            value={stats ? formatCurrency(stats.cashAvailable, currency) : '—'}
-            variant="success"
-            sublabel={t('dashboard.cashAvailableDesc')}
-            fullWidth
-          />
-        </motion.section>
-
-        <motion.section
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.02 }}
-          className="grid grid-cols-2 gap-3"
-        >
-          <BigStat
-            icon={<TrendingUp size={18} />}
-            label={t('dashboard.grossProfit')}
-            value={stats ? formatCurrency(stats.grossProfit, currency) : '—'}
-            variant={stats && stats.grossProfit < 0 ? 'danger' : 'success'}
-          />
-          <BigStat
-            icon={<Coins size={18} />}
-            label={t('dashboard.netProfit')}
-            value={stats ? formatCurrency(stats.netProfit, currency) : '—'}
-            variant={stats && stats.netProfit < 0 ? 'danger' : 'primary'}
-            sublabel={stats ? `${t('expense.totalThisMonth')}: ${formatCurrency(stats.monthExpenses, currency)}` : undefined}
-          />
-        </motion.section>
-
-        {/* Dues: Supplier Due + Customer Due */}
-        <motion.section
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.04 }}
-          className="grid grid-cols-2 gap-3"
-        >
-          <button onClick={onOpenSuppliers} className="text-left active:scale-[0.98] transition-transform">
-            <BigStat
-              icon={<Truck size={18} />}
-              label={t('dashboard.supplierDue')}
-              value={stats ? formatCurrency(stats.supplierDue, currency) : '—'}
-              variant={stats && stats.supplierDue > 0 ? 'danger' : 'info'}
-              sublabel={t('supplier.title')}
-            />
-          </button>
-          <button onClick={onOpenCredit} className="text-left active:scale-[0.98] transition-transform">
-            <BigStat
-              icon={<Users size={18} />}
-              label={t('dashboard.customerDue')}
-              value={stats ? formatCurrency(stats.customerDue, currency) : '—'}
-              variant={stats && stats.customerDue > 0 ? 'danger' : 'info'}
-              sublabel={t('credit.title')}
-            />
-          </button>
-        </motion.section>
-
-        {/* Today's Sales */}
-        <motion.section
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.06 }}
-          className="glass-strong rounded-3xl p-5"
-        >
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h3 className="font-bold text-stone-800 dark:text-amber-50">{t('dashboard.todaySales')}</h3>
-              <p className="text-xs text-stone-500 dark:text-amber-100/60">{formatDateShort(date)}</p>
-            </div>
-            {todayVsYesterday && (
-              <div className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1 ${
-                todayVsYesterday.up
-                  ? 'glass-success text-white'
-                  : todayVsYesterday.diff < 0
-                  ? 'glass-danger text-white'
-                  : 'glass text-stone-700 dark:text-amber-100'
-              }`}>
-                {todayVsYesterday.up ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
-                {Math.abs(todayVsYesterday.diff) < 1 ? '—' : formatCurrency(Math.abs(todayVsYesterday.diff), currency)}
-              </div>
-            )}
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            <div className="glass rounded-2xl p-3">
-              <p className="text-xs text-stone-600 dark:text-amber-100/70">{t('dashboard.todaySell')}</p>
-              <p className="text-base font-bold text-stone-800 dark:text-amber-50">
-                {stats ? formatCurrency(stats.todaySales, currency) : '—'}
-              </p>
-            </div>
-            <div className="glass rounded-2xl p-3">
-              <p className="text-xs text-stone-600 dark:text-amber-100/70">{t('dashboard.todayProfit')}</p>
-              <p className={`text-base font-bold ${stats && stats.todayProfit < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'}`}>
-                {stats ? formatCurrency(stats.todayProfit, currency) : '—'}
-              </p>
-            </div>
-            <div className="glass rounded-2xl p-3">
-              <p className="text-xs text-stone-600 dark:text-amber-100/70">{t('dashboard.todayEggs')}</p>
-              <p className="text-base font-bold text-stone-800 dark:text-amber-50">
-                {stats ? `${formatNumber(stats.todayItems)}` : '—'}
-              </p>
-            </div>
-          </div>
-          {todayVsYesterday && (
-            <p className="text-xs text-stone-500 dark:text-amber-100/50 mt-2">
-              {t('dashboard.vsYesterday')}: {todayVsYesterday.up ? '↑' : '↓'} {Math.abs(todayVsYesterday.pct).toFixed(1)}%
-            </p>
-          )}
-        </motion.section>
-
-        {/* Business Health */}
-        {stats && todayVsYesterday && (
-          <motion.section
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.08 }}
-            className="glass-strong rounded-3xl p-5"
-          >
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-bold text-stone-800 dark:text-amber-50">{t('dashboard.businessHealth')}</h3>
-              <div className={`px-3 py-1 rounded-full text-xs font-bold ${
-                stats.todayProfit < 0 ? 'glass-danger text-white' :
-                todayVsYesterday.up ? 'glass-success text-white' : 'glass text-stone-700 dark:text-amber-100'
-              }`}>
-                {stats.todayProfit < 0 ? t('dashboard.worstDay') :
-                 todayVsYesterday.up ? t('dashboard.goodDay') : t('dashboard.slowDay')}
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="glass rounded-2xl p-3">
-                <p className="text-xs text-stone-600 dark:text-amber-100/70">{t('dashboard.vsYesterday')}</p>
-                <p className={`text-lg font-bold ${todayVsYesterday.up ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                  {todayVsYesterday.up ? '↑' : '↓'} {formatCurrency(Math.abs(todayVsYesterday.diff), currency)}
-                </p>
-                <p className="text-[10px] text-stone-500 dark:text-amber-100/50 mt-0.5">
-                  {Math.abs(todayVsYesterday.pct).toFixed(1)}%
-                </p>
-              </div>
-              <div className="glass rounded-2xl p-3">
-                <p className="text-xs text-stone-600 dark:text-amber-100/70">{t('dashboard.vsLastMonth')}</p>
-                <p className={`text-lg font-bold ${monthVsLastMonth?.up ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                  {monthVsLastMonth ? `${monthVsLastMonth.up ? '↑' : '↓'} ${formatCurrency(Math.abs(monthVsLastMonth.diff), currency)}` : '—'}
-                </p>
-                <p className="text-[10px] text-stone-500 dark:text-amber-100/50 mt-0.5">
-                  {monthVsLastMonth ? `${Math.abs(monthVsLastMonth.pct).toFixed(1)}%` : ''}
-                </p>
-              </div>
-            </div>
-          </motion.section>
-        )}
-
-        {/* Stock Alerts */}
-        <motion.section
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-          className="glass-strong rounded-3xl p-5"
-        >
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <div className="w-9 h-9 rounded-xl glass-danger flex items-center justify-center text-white">
-                <AlertTriangle size={16} />
-              </div>
-              <div>
-                <h3 className="font-bold text-stone-800 dark:text-amber-50">{t('dashboard.todayStockAlerts')}</h3>
-                <p className="text-xs text-stone-500 dark:text-amber-100/60">
-                  {stats ? `${stats.outOfStockCount} ${t('inventory.outOfStockCount')} · ${stats.lowStockCount} ${t('inventory.lowStockCount')}` : ''}
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={onOpenInventory}
-              className="text-xs text-amber-700 dark:text-amber-300 font-semibold flex items-center gap-0.5"
-            >
-              {t('dashboard.seeAll')} <ChevronRight size={12} />
+        {editing && (
+          <div className="px-4 pb-2 max-w-5xl mx-auto w-full flex items-center justify-between">
+            <p className="text-[11px] text-amber-700 dark:text-amber-300 font-semibold">{t('dashboard.editLayout')}</p>
+            <button onClick={resetOrder} className="text-[11px] text-stone-500 dark:text-amber-100/60 font-semibold">
+              Reset
             </button>
           </div>
-          {stats && stats.lowStockProducts.length > 0 ? (
-            <div className="space-y-1.5 max-h-44 overflow-y-auto scroll-area">
-              {stats.lowStockProducts.slice(0, 6).map((p) => (
-                <div key={p.id} className="glass rounded-xl p-2.5 flex items-center justify-between">
-                  <p className="text-sm font-semibold text-stone-800 dark:text-amber-50 truncate">{p.name}</p>
-                  <span className={`text-xs font-bold ${p.qty === 0 ? 'text-red-600 dark:text-red-400' : 'text-orange-600 dark:text-orange-400'}`}>
-                    {formatNumber(p.qty)} / {formatNumber(p.threshold)}
-                  </span>
-                </div>
-              ))}
-              {stats.lowStockProducts.length > 6 && (
-                <p className="text-xs text-stone-500 dark:text-amber-100/50 text-center pt-1">
-                  +{stats.lowStockProducts.length - 6} more
-                </p>
-              )}
-            </div>
-          ) : (
-            <p className="text-sm text-stone-500 dark:text-amber-100/60 text-center py-3">
-              {t('dashboard.noStockAlerts')}
-            </p>
-          )}
-        </motion.section>
-
-        {/* Top Selling Product */}
-        {stats && stats.topProduct && (
-          <motion.section
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.12 }}
-            className="glass-strong rounded-3xl p-5"
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-2xl glass-success flex items-center justify-center text-white">
-                <Crown size={20} />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs text-stone-500 dark:text-amber-100/60">{t('dashboard.topSellingProduct')}</p>
-                <p className="font-bold text-stone-800 dark:text-amber-50 truncate">{stats.topProduct.name}</p>
-                <p className="text-xs text-stone-600 dark:text-amber-100/70">
-                  {formatNumber(stats.topProduct.qty)} {t('dashboard.units')} · {formatCurrency(stats.topProduct.profit, currency)}
-                </p>
-              </div>
-            </div>
-          </motion.section>
         )}
+      </header>
 
-        {/* Monthly Comparison */}
-        {monthVsLastMonth && (
-          <motion.section
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.14 }}
-            className="glass-strong rounded-3xl p-5"
-          >
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h3 className="font-bold text-stone-800 dark:text-amber-50">{t('dashboard.monthlyComparison')}</h3>
-                <p className="text-xs text-stone-500 dark:text-amber-100/60">{monthLabel}</p>
-              </div>
-              <div className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1 ${
-                monthVsLastMonth.up ? 'glass-success text-white' : 'glass-danger text-white'
-              }`}>
-                {monthVsLastMonth.up ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
-                {Math.abs(monthVsLastMonth.pct).toFixed(1)}%
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="glass rounded-2xl p-3">
-                <p className="text-xs text-stone-600 dark:text-amber-100/70">{t('dashboard.thisMonth')}</p>
-                <p className="text-base font-bold text-stone-800 dark:text-amber-50">
-                  {stats ? formatCurrency(stats.monthProfit, currency) : '—'}
-                </p>
-              </div>
-              <div className="glass rounded-2xl p-3">
-                <p className="text-xs text-stone-600 dark:text-amber-100/70">{t('dashboard.lastMonth')}</p>
-                <p className="text-base font-bold text-stone-500 dark:text-amber-100/60">
-                  {stats ? formatCurrency(stats.lastMonthProfit, currency) : '—'}
-                </p>
-              </div>
-            </div>
-          </motion.section>
-        )}
+      <main className="px-4 py-4 space-y-3 max-w-5xl mx-auto w-full">
+        {/* Reorderable sections */}
+        {order.map((id) => {
+          const content = sectionMap[id];
+          if (!content) return null;
+          const el = renderSection(id, content, Math.min(delayIdx * 0.03, 0.3));
+          delayIdx++;
+          return el;
+        })}
 
-        {/* Last 7 days chart */}
+        {/* 7-day profit chart (always after reorderable sections) */}
         <motion.section
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.16 }}
-          className="glass-strong rounded-3xl p-5"
+          transition={{ delay: 0.2 }}
+          className="glass rounded-2xl p-4"
         >
           <div className="flex items-center justify-between mb-3">
             <div>
-              <h3 className="font-bold text-stone-800 dark:text-amber-50">{t('trend.monthlyProfit')}</h3>
-              <p className="text-xs text-stone-500 dark:text-amber-100/60">{t('dashboard.last5ProfitSub')}</p>
+              <h3 className="font-bold text-sm text-stone-800 dark:text-amber-50">{t('trend.monthlyProfit')}</h3>
+              <p className="text-[10px] text-stone-500 dark:text-amber-100/60">{t('dashboard.last5ProfitSub')}</p>
             </div>
             <button
               onClick={onSeeAllReports}
-              className="text-xs text-amber-700 dark:text-amber-300 font-semibold flex items-center gap-0.5"
+              className="text-[10px] text-amber-700 dark:text-amber-300 font-semibold flex items-center gap-0.5"
             >
-              {t('dashboard.seeAll')} <ChevronRight size={12} />
+              {t('dashboard.seeAll')} <ChevronRight size={10} />
             </button>
           </div>
           {last7.length > 0 ? (
-            <div className="h-48 -mx-2">
+            <div className="h-40 -mx-2">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={last7} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
+                <BarChart data={last7} margin={{ top: 8, right: 8, bottom: 0, left: -20 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,113,108,0.15)" vertical={false} />
-                  <XAxis
-                    dataKey="label"
-                    tick={{ fontSize: 10, fill: 'currentColor' }}
-                    axisLine={false}
-                    tickLine={false}
-                    className="text-stone-500"
-                  />
-                  <YAxis
-                    tick={{ fontSize: 10, fill: 'currentColor' }}
-                    axisLine={false}
-                    tickLine={false}
-                    className="text-stone-500"
-                  />
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: 'currentColor' }} axisLine={false} tickLine={false} className="text-stone-500" />
+                  <YAxis tick={{ fontSize: 10, fill: 'currentColor' }} axisLine={false} tickLine={false} className="text-stone-500" />
                   <Tooltip
                     cursor={{ fill: 'rgba(245,158,11,0.1)' }}
-                    contentStyle={{
-                      background: 'rgba(255,255,255,0.95)',
-                      border: '1px solid rgba(245,158,11,0.3)',
-                      borderRadius: '12px',
-                      fontSize: '12px',
-                    }}
+                    contentStyle={{ background: 'rgba(255,255,255,0.95)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '12px', fontSize: '12px' }}
                     formatter={(value: any) => [formatCurrency(Number(value), currency), t('dashboard.todayProfit')]}
                   />
-                  <Bar dataKey="profit" radius={[8, 8, 0, 0]}>
+                  <Bar dataKey="profit" radius={[6, 6, 0, 0]}>
                     {last7.map((entry, i) => (
                       <Cell key={i} fill={entry.profit < 0 ? '#ef4444' : '#f59e0b'} />
                     ))}
@@ -472,44 +536,65 @@ export function Dashboard({
               </ResponsiveContainer>
             </div>
           ) : (
-            <div className="h-48 flex items-center justify-center text-stone-500 dark:text-amber-100/60 text-sm">
+            <div className="h-40 flex items-center justify-center text-stone-500 dark:text-amber-100/60 text-sm">
               {t('dashboard.noData')}
             </div>
           )}
         </motion.section>
 
+        {/* Top selling product */}
+        {stats && stats.topProduct && (
+          <motion.section
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.22 }}
+            className="glass rounded-2xl p-3 flex items-center gap-3"
+          >
+            <div className="w-10 h-10 rounded-xl glass-success flex items-center justify-center text-white flex-shrink-0">
+              <Crown size={16} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] text-stone-500 dark:text-amber-100/60">{t('dashboard.topSellingProduct')}</p>
+              <p className="font-bold text-sm text-stone-800 dark:text-amber-50 truncate">{stats.topProduct.name}</p>
+              <p className="text-[10px] text-stone-600 dark:text-amber-100/70">
+                {formatNumber(stats.topProduct.qty)} {t('dashboard.units')} · {formatCurrency(stats.topProduct.profit, currency)}
+              </p>
+            </div>
+          </motion.section>
+        )}
+
         {/* Quick links */}
         <motion.section
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-          className="grid grid-cols-2 gap-3"
+          transition={{ delay: 0.24 }}
+          className="grid grid-cols-2 gap-2.5"
         >
           <button
             onClick={onOpenInventory}
-            className="glass-strong rounded-3xl p-4 flex items-center gap-3 active:scale-[0.98] transition-transform"
+            className="glass rounded-2xl p-3 flex items-center gap-2.5 active:scale-[0.98] transition-transform"
           >
-            <div className="w-11 h-11 rounded-2xl glass-primary flex items-center justify-center text-white">
-              <Package size={18} />
+            <div className="w-9 h-9 rounded-xl glass-primary flex items-center justify-center text-white flex-shrink-0">
+              <Package size={15} />
             </div>
             <div className="text-left flex-1 min-w-0">
-              <p className="font-bold text-sm text-stone-800 dark:text-amber-50">{t('inventory.title')}</p>
-              <p className="text-xs text-stone-600 dark:text-amber-100/70 truncate">{t('inventory.sub')}</p>
+              <p className="font-bold text-xs text-stone-800 dark:text-amber-50">{t('inventory.title')}</p>
+              <p className="text-[10px] text-stone-600 dark:text-amber-100/70 truncate">{t('inventory.sub')}</p>
             </div>
-            <ChevronRight size={16} className="text-stone-400 dark:text-amber-100/40" />
+            <ChevronRight size={14} className="text-stone-400 dark:text-amber-100/40" />
           </button>
           <button
             onClick={onOpenExpenses}
-            className="glass-strong rounded-3xl p-4 flex items-center gap-3 active:scale-[0.98] transition-transform"
+            className="glass rounded-2xl p-3 flex items-center gap-2.5 active:scale-[0.98] transition-transform"
           >
-            <div className="w-11 h-11 rounded-2xl glass-info flex items-center justify-center text-white">
-              <ShoppingBag size={18} />
+            <div className="w-9 h-9 rounded-xl glass-info flex items-center justify-center text-white flex-shrink-0">
+              <ShoppingBag size={15} />
             </div>
             <div className="text-left flex-1 min-w-0">
-              <p className="font-bold text-sm text-stone-800 dark:text-amber-50">{t('expense.title')}</p>
-              <p className="text-xs text-stone-600 dark:text-amber-100/70 truncate">{t('expense.sub')}</p>
+              <p className="font-bold text-xs text-stone-800 dark:text-amber-50">{t('expense.title')}</p>
+              <p className="text-[10px] text-stone-600 dark:text-amber-100/70 truncate">{t('expense.sub')}</p>
             </div>
-            <ChevronRight size={16} className="text-stone-400 dark:text-amber-100/40" />
+            <ChevronRight size={14} className="text-stone-400 dark:text-amber-100/40" />
           </button>
         </motion.section>
       </main>
@@ -517,13 +602,14 @@ export function Dashboard({
   );
 }
 
-function BigStat({ icon, label, value, variant, sublabel, fullWidth }: {
+// ─── Compact financial card ──────────────────────────────────────────────────
+
+function FinCard({ icon, label, value, variant, sub }: {
   icon: React.ReactNode;
   label: string;
   value: string;
   variant: 'primary' | 'success' | 'info' | 'muted' | 'danger';
-  sublabel?: string;
-  fullWidth?: boolean;
+  sub?: string;
 }) {
   const colorMap = {
     primary: 'glass-primary',
@@ -533,16 +619,31 @@ function BigStat({ icon, label, value, variant, sublabel, fullWidth }: {
     danger: 'glass-danger',
   };
   return (
-    <div className={`${colorMap[variant]} rounded-3xl p-4 ${fullWidth ? 'col-span-2' : ''}`}>
-      <div className="flex items-center gap-1.5 mb-1.5 opacity-90">
+    <div className={`${colorMap[variant]} rounded-2xl p-3`}>
+      <div className="flex items-center gap-1.5 mb-1 opacity-90">
         {icon}
-        <span className="text-xs">{label}</span>
+        <span className="text-[11px]">{label}</span>
       </div>
-      <p className="text-xl font-bold leading-tight">{value}</p>
-      {sublabel && <p className="text-[10px] opacity-80 mt-1 truncate">{sublabel}</p>}
+      <p className="text-lg font-bold leading-tight">{value}</p>
+      {sub && <p className="text-[9px] opacity-80 mt-0.5 truncate">{sub}</p>}
     </div>
   );
 }
+
+// ─── Mini stat for Today's Sales ──────────────────────────────────────────────
+
+function MiniStat({ label, value, negative }: { label: string; value: string; negative?: boolean }) {
+  return (
+    <div className="glass rounded-xl p-2.5">
+      <p className="text-[10px] text-stone-500 dark:text-amber-100/60">{label}</p>
+      <p className={`text-sm font-bold ${negative ? 'text-red-600 dark:text-red-400' : 'text-stone-800 dark:text-amber-50'}`}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
+// ─── Quick action button ─────────────────────────────────────────────────────
 
 function QuickAction({ icon, label, onClick, variant }: {
   icon: React.ReactNode;
@@ -559,12 +660,12 @@ function QuickAction({ icon, label, onClick, variant }: {
   return (
     <button
       onClick={onClick}
-      className="flex flex-col items-center gap-1.5 p-2.5 rounded-2xl glass active:scale-95 transition-transform"
+      className="flex flex-col items-center gap-1 p-2 rounded-xl glass active:scale-95 transition-transform"
     >
-      <div className={`w-10 h-10 rounded-xl ${colorMap[variant]} flex items-center justify-center text-white`}>
+      <div className={`w-9 h-9 rounded-lg ${colorMap[variant]} flex items-center justify-center text-white`}>
         {icon}
       </div>
-      <span className="text-[10px] font-semibold text-stone-700 dark:text-amber-100 text-center leading-tight">{label}</span>
+      <span className="text-[9px] font-semibold text-stone-700 dark:text-amber-100 text-center leading-tight">{label}</span>
     </button>
   );
 }

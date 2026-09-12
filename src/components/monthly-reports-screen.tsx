@@ -2,14 +2,15 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
-import { ArrowLeft, TrendingUp, Egg, Wallet, Award, AlertCircle } from 'lucide-react';
+import { ArrowLeft, TrendingUp, Wallet, Award, AlertCircle, Receipt, PackageX, LineChart as LineChartIcon } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell, PieChart, Pie, Legend,
+  LineChart, Line,
 } from 'recharts';
 import {
-  getMonthSummary, getDayRecordsForRange, getCategories, useI18n,
-  formatCurrency, formatNumber, formatDateShort,
-  type MonthSummary, type DayRecord, type EggCategory,
+  getMonthSummary, getDayRecordsForRange, getCategories, getSalesForDateRange, useI18n,
+  formatCurrency, formatNumber, formatQuantity, formatDateShort,
+  type MonthSummary, type DayRecord, type EggCategory, type Sale,
 } from '@/lib/data-hooks-adapter';
 import { formatMonth, SINHALA_MONTHS, ENGLISH_MONTHS } from '@/lib/sinhala';
 
@@ -27,19 +28,22 @@ export function MonthlyReportsScreen({ onBack, onOpenDaily, onOpenPdf, currency 
   const [summary, setSummary] = useState<MonthSummary | null>(null);
   const [days, setDays] = useState<DayRecord[]>([]);
   const [products, setCategories] = useState<EggCategory[]>([]);
+  const [sales, setSales] = useState<Sale[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     (async () => {
       setLoading(true);
-      const [s, d, c] = await Promise.all([
+      const [s, d, c, sl] = await Promise.all([
         getMonthSummary(month),
         getDayRecordsForRange(`${month}-01`, `${month}-31`),
         getCategories(),
+        getSalesForDateRange(`${month}-01`, `${month}-31`),
       ]);
       setSummary(s);
       setDays(d.sort((a, b) => (a.date < b.date ? -1 : 1)));
       setCategories(c);
+      setSales(sl);
       setLoading(false);
     })();
   }, [month]);
@@ -153,14 +157,16 @@ export function MonthlyReportsScreen({ onBack, onOpenDaily, onOpenPdf, currency 
               <h2 className="font-bold text-stone-800 dark:text-amber-50 mb-3">{t('monthly.summary', { month: formatMonth(month, lang) })}</h2>
               <div className="grid grid-cols-2 gap-3 mb-3">
                 <BigStat icon={<TrendingUp size={16} />} label={t('monthly.totalProfit')} value={formatCurrency(summary.totalProfit, currency)} variant={summary.totalProfit < 0 ? 'danger' : 'success'} />
-                <BigStat icon={<Egg size={16} />} label={t('monthly.totalEggs')} value={`${formatNumber(summary.totalItems)} $''`.trim()} variant="primary" />
-                <BigStat icon={<Wallet size={16} />} label={t('reports.totalSell')} value={formatCurrency(summary.totalSell, currency)} variant="info" />
-                <BigStat icon={<Wallet size={16} />} label={t('reports.totalBuy')} value={formatCurrency(summary.totalBuy, currency)} variant="muted" />
+                <BigStat icon={<Award size={16} />} label={t('monthly.netProfit')} value={formatCurrency(summary.netProfit, currency)} variant={summary.netProfit < 0 ? 'danger' : 'success'} />
+                <BigStat icon={<Wallet size={16} />} label={t('monthly.totalSell')} value={formatCurrency(summary.totalSell, currency)} variant="info" />
+                <BigStat icon={<Wallet size={16} />} label={t('monthly.totalBuy')} value={formatCurrency(summary.totalBuy, currency)} variant="muted" />
+                <BigStat icon={<Receipt size={16} />} label={t('monthly.expenses')} value={formatCurrency(summary.totalExpenses, currency)} variant="muted" />
+                <BigStat icon={<PackageX size={16} />} label={t('monthly.damageImpact')} value={formatCurrency(summary.totalDamageCost, currency)} variant={summary.totalDamageCost > 0 ? 'danger' : 'muted'} />
               </div>
               <div className="grid grid-cols-3 gap-2 text-center">
+                <MiniStat label={t('monthly.totalEggs')} value={formatQuantity(summary.totalItems)} />
                 <MiniStat label={t('monthly.dailyAvg')} value={formatCurrency(summary.averageDailyProfit, currency)} />
                 <MiniStat label={t('monthly.openDays')} value={`${summary.openDays}`} />
-                <MiniStat label={t('monthly.closedDays')} value={`${summary.closedDays}`} />
               </div>
             </motion.section>
 
@@ -254,7 +260,7 @@ export function MonthlyReportsScreen({ onBack, onOpenDaily, onOpenPdf, currency 
                       </Pie>
                       <Tooltip
                         contentStyle={{ background: 'rgba(255,255,255,0.95)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '12px', fontSize: '12px' }}
-                        formatter={(v: any, n: any) => [`${formatNumber(Number(v))} $'eggs'`, n]}
+                        formatter={(v: any, n: any) => [formatQuantity(Number(v)), n]}
                       />
                       <Legend wrapperStyle={{ fontSize: 11 }} iconType="circle" />
                     </PieChart>
@@ -262,6 +268,68 @@ export function MonthlyReportsScreen({ onBack, onOpenDaily, onOpenPdf, currency 
                 </div>
               </motion.section>
             )}
+
+            {/* Product daily trend line chart */}
+            {sales.length > 0 && (() => {
+              // Build trend data: one entry per day of month, each with per-product qty
+              const [y, m] = month.split('-').map(Number);
+              const daysInMonth = new Date(y, m, 0).getDate();
+              const trendData: { day: string; [productName: string]: number | string }[] = [];
+              // Get products that have sales this month
+              const productIds = new Set(sales.map(s => s.productId));
+              const productInfos = Array.from(productIds).map(pid => {
+                const p = products.find(x => x.id === pid);
+                return { id: pid, name: p?.name || pid, color: p?.color || '#f59e0b' };
+              });
+              for (let d = 1; d <= daysInMonth; d++) {
+                const dateStr = `${month}-${String(d).padStart(2, '0')}`;
+                const entry: { day: string; [k: string]: number | string } = { day: String(d) };
+                for (const pi of productInfos) {
+                  entry[pi.name] = 0;
+                }
+                const daySales = sales.filter(s => s.date === dateStr);
+                for (const s of daySales) {
+                  const pi = productInfos.find(p => p.id === s.productId);
+                  if (pi) entry[pi.name] = (entry[pi.name] as number) + s.quantity;
+                }
+                // Only include days that have at least one sale
+                const hasSales = daySales.length > 0;
+                if (hasSales) trendData.push(entry);
+              }
+              if (trendData.length === 0) return null;
+              return (
+                <motion.section
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.18 }}
+                  className="glass-strong rounded-3xl p-5"
+                >
+                  <h3 className="font-bold text-stone-800 dark:text-amber-50 mb-3 flex items-center gap-1.5">
+                    <LineChartIcon size={14} className="text-amber-500" /> {t('reports.productTrendChart')}
+                  </h3>
+                  <p className="text-[10px] text-stone-500 dark:text-amber-100/60 mb-2">
+                    {t('monthly.trendDesc', { month: formatMonth(month, lang) })}
+                  </p>
+                  <div className="h-56">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={trendData} margin={{ top: 5, right: 10, bottom: 0, left: -15 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,113,108,0.15)" vertical={false} />
+                        <XAxis dataKey="day" tick={{ fontSize: 9, fill: 'currentColor' }} axisLine={false} tickLine={false} className="text-stone-500" />
+                        <YAxis tick={{ fontSize: 9, fill: 'currentColor' }} axisLine={false} tickLine={false} className="text-stone-500" />
+                        <Tooltip
+                          contentStyle={{ background: 'rgba(255,255,255,0.95)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '12px', fontSize: '11px' }}
+                          formatter={(v: any, n: any) => [formatQuantity(Number(v)), n]}
+                        />
+                        <Legend wrapperStyle={{ fontSize: 10 }} iconType="circle" />
+                        {productInfos.map((pi) => (
+                          <Line key={pi.id} type="monotone" dataKey={pi.name} stroke={pi.color} strokeWidth={2} dot={{ r: 2, fill: pi.color }} activeDot={{ r: 4 }} />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </motion.section>
+              );
+            })()}
 
             {/* Per-category table */}
             {summary.perCategory.filter(c => c.totalItems > 0).length > 0 && (
@@ -272,22 +340,35 @@ export function MonthlyReportsScreen({ onBack, onOpenDaily, onOpenPdf, currency 
                 className="glass-strong rounded-3xl p-5"
               >
                 <h3 className="font-bold text-stone-800 dark:text-amber-50 mb-3">{t('monthly.categoryDetail')}</h3>
-                <div className="space-y-2">
-                  {summary.perCategory.filter(c => c.totalItems > 0).map((c) => {
-                    const cat = products.find((x) => x.id === c.productId);
-                    return (
-                      <div key={c.productId} className="glass rounded-xl p-3 flex items-center gap-3">
-                        <div className="w-2 h-8 rounded-full" style={{ background: cat?.color }} />
-                        <div className="flex-1">
-                          <p className="font-semibold text-sm text-stone-800 dark:text-amber-50">{cat?.name}</p>
-                          <p className="text-xs text-stone-600 dark:text-amber-100/70">{formatNumber(c.totalItems)} 'eggs'</p>
-                        </div>
-                        <p className={`font-bold text-sm ${c.totalProfit < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'}`}>
-                          {formatCurrency(c.totalProfit, currency)}
-                        </p>
-                      </div>
-                    );
-                  })}
+                <div className="glass rounded-2xl overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-stone-600 dark:text-amber-100/70 border-b border-white/20 dark:border-white/10">
+                        <th className="text-left py-2 px-3 font-semibold">{t('pdf.report.eggType')}</th>
+                        <th className="text-right py-2 px-3 font-semibold">{t('common.quantity')}</th>
+                        <th className="text-right py-2 px-3 font-semibold">{t('common.revenue')}</th>
+                        <th className="text-right py-2 px-3 font-semibold">{t('common.profit')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {summary.perCategory.filter(c => c.totalItems > 0).map((c) => {
+                        const cat = products.find((x) => x.id === c.productId);
+                        return (
+                          <tr key={c.productId} className="border-b border-white/10 dark:border-white/5 last:border-0">
+                            <td className="py-2.5 px-3 text-stone-800 dark:text-amber-50">
+                              <span className="flex items-center gap-2">
+                                <span className="w-2 h-4 rounded-full flex-shrink-0" style={{ background: cat?.color }} />
+                                <span className="font-semibold">{cat?.name}</span>
+                              </span>
+                            </td>
+                            <td className="text-right py-2.5 px-3 text-stone-700 dark:text-amber-100 font-semibold">{formatQuantity(c.totalItems)}</td>
+                            <td className="text-right py-2.5 px-3 text-stone-700 dark:text-amber-100">{formatCurrency(c.totalSell, currency)}</td>
+                            <td className={`text-right py-2.5 px-3 font-bold ${c.totalProfit < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'}`}>{formatCurrency(c.totalProfit, currency)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               </motion.section>
             )}

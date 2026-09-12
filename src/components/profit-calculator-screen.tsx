@@ -11,14 +11,15 @@ import {
   type Sale, type PriceSession, type DamageRecord,
 } from '@/lib/data-hooks-adapter';
 import { useAppToast } from './toast-provider';
-import { formatDate, formatNumber, formatCurrency } from '@/lib/sinhala';
+import { formatDate, formatNumber, formatCurrency, formatQuantity } from '@/lib/sinhala';
 
 type Props = {
   date: string;
   onBack: () => void;
+  currency: string;
 };
 
-export function ProfitCalculatorScreen({ date, onBack }: Props) {
+export function ProfitCalculatorScreen({ date, onBack, currency }: Props) {
   const { products } = useProducts();
   const { day, sales, sessions, loading, refresh } = useDayData(date);
   const { inventory, refresh: refreshInventory } = useInventory();
@@ -188,7 +189,7 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
       await refreshInventory();
       const updated = await getDamagesForDate(date);
       setDamages(updated);
-      toast({ title: t('damage.saved'), description: t('damage.savedDesc', { qty: formatNumber(qtyN), amount: (qtyN * priceN).toFixed(2) }), variant: 'success' });
+      toast({ title: t('damage.saved'), description: t('damage.savedDesc', { qty: formatNumber(qtyN), amount: formatCurrency(qtyN * priceN, currency) }), variant: 'success' });
       setShowDamageForm(false);
     } catch (e: any) {
       toast({ title: t('toast.error'), description: e?.message, variant: 'error' });
@@ -321,7 +322,7 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
         await saveSale(sale);
         toast({
           title: t('calc.saleSaved.title'),
-          description: t('calc.saleSaved.desc', { qty: formatNumber(qtyN), profit: formatCurrency(totalProfit, 'LKR') }),
+          description: t('calc.saleSaved.desc', { qty: formatNumber(qtyN), profit: formatCurrency(totalProfit, currency) }),
           variant: 'success',
         });
       }
@@ -348,7 +349,7 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
   const handleDelete = async (sale: Sale) => {
     if (!confirm(t('calc.deleteConfirm', {
       qty: formatNumber(sale.quantity),
-      profit: formatCurrency(sale.profit, 'LKR'),
+      profit: formatCurrency(sale.profit, currency),
     }))) return;
     await deleteSale(sale.id, `Sale deleted for ${date}`);
     toast({ title: t('calc.deleted.title'), variant: 'success' });
@@ -410,10 +411,10 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
         {/* Today's totals */}
         {!loading && day && (
           <div className="grid grid-cols-2 gap-3">
-            <StatCard label={t('dashboard.todayProfit')} value={formatCurrency(day.totalProfit, 'LKR')} color="success" />
+            <StatCard label={t('dashboard.todayProfit')} value={formatCurrency(day.totalProfit, currency)} color="success" />
             <StatCard label={t('dashboard.todayEggs')} value={`${formatNumber((day.totalItems != null ? day.totalItems : (day as any).totalEggs))} `.trim()} color="primary" />
-            <StatCard label={t('dashboard.todaySell')} value={formatCurrency(day.totalSell, 'LKR')} color="info" />
-            <StatCard label={t('dashboard.todayBuy')} value={formatCurrency(day.totalBuy, 'LKR')} color="muted" />
+            <StatCard label={t('dashboard.todaySell')} value={formatCurrency(day.totalSell, currency)} color="info" />
+            <StatCard label={t('dashboard.todayBuy')} value={formatCurrency(day.totalBuy, currency)} color="muted" />
           </div>
         )}
 
@@ -561,7 +562,7 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
                   <div className="flex justify-between text-xs text-stone-600 dark:text-amber-100/70">
                     <span>{t('calc.profitPerEgg')}</span>
                     <span className={isNegative ? 'text-red-600 dark:text-red-400 font-bold' : 'text-green-700 dark:text-green-400 font-bold'}>
-                      {formatCurrency(profitPerEgg, 'LKR')}
+                      {formatCurrency(profitPerEgg, currency)}
                     </span>
                   </div>
                   <div className="flex justify-between text-xs text-stone-600 dark:text-amber-100/70">
@@ -571,7 +572,7 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
                   <div className="border-t border-white/30 dark:border-white/10 pt-1.5 flex justify-between">
                     <span className="text-sm font-semibold text-stone-700 dark:text-amber-100">{t('calc.totalProfit')}</span>
                     <span className={`text-lg font-bold ${isNegative ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'}`}>
-                      {formatCurrency(totalProfit, 'LKR')}
+                      {formatCurrency(totalProfit, currency)}
                     </span>
                   </div>
                 </div>
@@ -647,7 +648,7 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
                 <h2 className="font-bold text-sm text-stone-800 dark:text-amber-50">{t('damage.title')}</h2>
                 <p className="text-[10px] text-stone-500 dark:text-amber-100/50">
                   {damages.length > 0
-                    ? `${formatNumber(totalDamageEggs)} ${t('inventory.eggs')} · ${formatCurrency(totalDamageCost, 'LKR')}`
+                    ? `${formatNumber(totalDamageEggs)} ${t('inventory.eggs')} · ${formatCurrency(totalDamageCost, currency)}`
                     : t('damage.noDamages')}
                 </p>
               </div>
@@ -671,7 +672,7 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
                         {formatNumber(d.quantity)} {cat?.name}
                       </p>
                       <p className="text-[10px] text-stone-500 dark:text-amber-100/50">
-                        {formatCurrency(d.totalCost, 'LKR')} · {new Date(d.createdAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+                        {formatCurrency(d.totalCost, currency)} · {new Date(d.createdAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
                       </p>
                     </div>
                     <button
@@ -713,16 +714,16 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
                         </span>
                       </div>
                       <div className="flex items-center gap-3 text-xs text-stone-600 dark:text-amber-100/70 mt-0.5">
-                        <span>{formatNumber(sale.quantity)} ''</span>
+                        <span>{formatQuantity(sale.quantity)}</span>
                         <span>·</span>
-                        <span>'Buy' {formatCurrency(sale.buyPrice, 'LKR')}</span>
+                        <span>{t('common.buy')} {formatCurrency(sale.buyPrice, currency)}</span>
                         <span>·</span>
-                        <span>'Sell' {formatCurrency(sale.sellPrice, 'LKR')}</span>
+                        <span>{t('common.sell')} {formatCurrency(sale.sellPrice, currency)}</span>
                       </div>
                     </div>
                     <div className="text-right flex-shrink-0">
                       <p className={`font-bold text-sm ${sale.profit < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'}`}>
-                        {formatCurrency(sale.profit, 'LKR')}
+                        {formatCurrency(sale.profit, currency)}
                       </p>
                     </div>
                     <div className="flex flex-col gap-1">
@@ -771,7 +772,7 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
                         {unavailable && <span className="ml-2 text-[10px] text-stone-500">· {t('price.notAvailable')}</span>}
                       </p>
                       <p className="text-xs text-stone-600 dark:text-amber-100/70">
-                        {t('calc.sessionN', { n: s.sessionIndex + 1 })} · 'Buy' {unavailable ? '—' : formatCurrency(s.buyPrice!, 'LKR')} · 'Sell' {unavailable ? '—' : formatCurrency(s.sellPrice!, 'LKR')}
+                        {t('calc.sessionN', { n: s.sessionIndex + 1 })} · {t('common.buy')} {unavailable ? '—' : formatCurrency(s.buyPrice!, currency)} · {t('common.sell')} {unavailable ? '—' : formatCurrency(s.sellPrice!, currency)}
                       </p>
                     </div>
                     <span className="text-[10px] text-stone-500 dark:text-amber-100/50">
@@ -963,7 +964,7 @@ export function ProfitCalculatorScreen({ date, onBack }: Props) {
                   <div className="glass rounded-xl p-2.5 flex items-center justify-between">
                     <span className="text-xs text-stone-600 dark:text-amber-100/70">{t('damage.totalCost')}</span>
                     <span className="font-bold text-sm text-red-600 dark:text-red-400">
-                      {formatCurrency(parseInt(damageQty) * parseFloat(damagePrice), 'LKR')}
+                      {formatCurrency(parseInt(damageQty) * parseFloat(damagePrice), currency)}
                     </span>
                   </div>
                 )}

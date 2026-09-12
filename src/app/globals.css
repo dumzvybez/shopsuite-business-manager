@@ -241,6 +241,54 @@
   border-radius: 999px;
 }
 
+/* ---------- Settings form controls ---------- */
+
+.settings-input {
+  width: 100%;
+  padding: 0.625rem 0.75rem;
+  border-radius: 0.75rem;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  color: #292524;
+  font-weight: 600;
+  font-size: 0.875rem;
+  outline: none;
+  transition: box-shadow 0.15s;
+}
+.settings-input:focus {
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.5);
+}
+.settings-input::placeholder {
+  color: rgba(120, 113, 108, 0.6);
+  font-weight: 400;
+}
+.dark .settings-input {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #fef3c7;
+}
+.dark .settings-input::placeholder {
+  color: rgba(254, 243, 199, 0.4);
+}
+
+.settings-select {
+  width: 100%;
+  height: 2.75rem;
+  padding: 0 0.75rem;
+  border-radius: 0.75rem;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  color: #292524;
+  font-weight: 600;
+  font-size: 0.875rem;
+  outline: none;
+}
+.dark .settings-select {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #fef3c7;
+}
+
 /* ---------- Animations ---------- */
 
 @keyframes float-in {

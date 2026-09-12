@@ -572,7 +572,7 @@ function PurchaseForm({ open, onClose, onSaved, supplierId, currency }: {
       }
       toast({
         title: t('supplier.purchaseSaved'),
-        description: t('supplier.purchaseSavedDesc', { qty: formatNumber(totalEggs), amount: totalCost.toFixed(2) }),
+        description: t('supplier.purchaseSavedDesc', { qty: formatNumber(totalEggs), amount: formatCurrency(totalCost, currency) }),
         variant: 'success',
       });
       onSaved();
@@ -807,7 +807,7 @@ function PaymentForm({ supplierId, totalRemaining, totalPaid, totalCost, open, o
       }
       toast({
         title: t('supplier.paymentSaved'),
-        description: t('supplier.paymentSavedDesc', { amount: amountN.toFixed(2) }),
+        description: t('supplier.paymentSavedDesc', { amount: formatCurrency(amountN, currency) }),
         variant: 'success',
       });
       onSaved();

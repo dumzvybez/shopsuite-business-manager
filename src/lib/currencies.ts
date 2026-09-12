@@ -30,14 +30,11 @@ export function getCurrency(code: string): CurrencyDef {
   return CURRENCIES.find((c) => c.code === code) || CURRENCIES[0];
 }
 
-export function formatCurrencyValue(amount: number, code: string): string {
-  const c = getCurrency(code);
-  const formatted = Math.abs(amount).toLocaleString('en-US', {
-    minimumFractionDigits: c.decimals,
-    maximumFractionDigits: c.decimals,
-  });
-  const sign = amount < 0 ? '-' : '';
-  return c.position === 'before'
-    ? `${sign}${c.symbol} ${formatted}`
-    : `${sign}${formatted} ${c.symbol}`;
+/**
+ * Return the number of decimal places a currency should display.
+ * Used by CSV/Excel exports and any code that needs raw numeric formatting
+ * aligned to the active currency (e.g. JPY = 0 decimals, LKR = 2).
+ */
+export function currencyDecimals(code: string): number {
+  return getCurrency(code).decimals;
 }

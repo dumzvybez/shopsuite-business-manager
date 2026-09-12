@@ -71,10 +71,35 @@ export function formatNumber(n: number, decimals = 0): string {
 }
 
 /**
- * Format a number as a currency string using the user's selected currency.
- * Falls back gracefully if currencyCode is unknown.
+ * Format a bare quantity (stock, units sold, etc.) — a number with thousands
+ * separators and NO unit suffix. Use this in table columns and stat cards
+ * where the column header / label already conveys what is being counted.
  *
- * v3.1: now uses the multi-currency system from currencies.ts.
+ * For "number + unit" contexts (e.g. inline prose), use formatQuantityWithUnit.
+ */
+export function formatQuantity(n: number): string {
+  return formatNumber(n, 0);
+}
+
+/**
+ * Format a quantity together with its unit label, e.g. "260 pcs", "12 dozen".
+ * Use this only in inline prose / summaries where the unit adds clarity.
+ * In tabular contexts prefer formatQuantity() alone.
+ */
+export function formatQuantityWithUnit(n: number, unit: string): string {
+  const u = (unit || '').trim();
+  return u ? `${formatQuantity(n)} ${u}` : formatQuantity(n);
+}
+
+/**
+ * Format a monetary value using the user's selected currency.
+ *
+ * This is the SINGLE canonical currency formatter for the whole app.
+ * It looks up the symbol, decimal count and symbol position from
+ * currencies.ts. Changing Settings.currency instantly updates every call.
+ *
+ * Always pass the active currency code (from Settings.currency / useSettings).
+ * Never hardcode a currency symbol ("LKR", "$", "Rs") in component code.
  */
 export function formatCurrency(n: number, currencyCode = 'LKR'): string {
   const c = getCurrency(currencyCode);

@@ -8,21 +8,23 @@ import {
 } from 'lucide-react';
 import {
   useProducts, useInventory, useI18n,
-  saveProduct, updateProduct, deleteProduct, getAllStockMovements, genId,
+  saveProduct, updateProduct, deleteProduct, adjustInventory, getAllStockMovements, genId,
   formatNumber, formatDate, todayStr,
   PRODUCT_COLOR_PALETTE,
   type Product, type StockMovement,
 } from '@/lib/data-hooks-adapter';
 import { useAppToast } from './toast-provider';
+import { getCurrency } from '@/lib/currencies';
 
 const MEDIUM_THRESHOLD = 50;
 const HIGH_THRESHOLD = 100;
 
 type Props = {
   onBack: () => void;
+  currency: string;
 };
 
-export function InventoryScreen({ onBack }: Props) {
+export function InventoryScreen({ onBack, currency }: Props) {
   const { t, lang } = useI18n();
   const { products, refresh: refreshProducts } = useProducts();
   const { inventory, refresh: refreshInventory } = useInventory();
@@ -31,6 +33,9 @@ export function InventoryScreen({ onBack }: Props) {
   const [showHistory, setShowHistory] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
+  const [addStockProduct, setAddStockProduct] = useState<Product | null>(null);
+
+  const currencySymbol = getCurrency(currency).symbol;
 
   useEffect(() => {
     getAllStockMovements().then(setMovements);
@@ -168,10 +173,17 @@ export function InventoryScreen({ onBack }: Props) {
                         {p.category || '—'} · {p.unit || 'pcs'}
                       </p>
                       <p className="text-[10px] text-stone-500 dark:text-amber-100/50 mt-0.5">
-                        Buy: LKR {formatNumber(p.purchasePrice, 2)} · Sell: LKR {formatNumber(p.sellingPrice, 2)}
+                        Buy: {currencySymbol} {formatNumber(p.purchasePrice, 2)} · Sell: {currencySymbol} {formatNumber(p.sellingPrice, 2)}
                       </p>
                     </div>
                     <div className="flex flex-col gap-1">
+                      <button
+                        onClick={() => setAddStockProduct(p)}
+                        className="w-7 h-7 rounded-lg glass-success flex items-center justify-center text-white active:scale-90 transition-transform"
+                        aria-label={t('inventory.addStock')}
+                      >
+                        <Plus size={12} />
+                      </button>
                       <button
                         onClick={() => handleOpenEdit(p)}
                         className="w-7 h-7 rounded-lg glass flex items-center justify-center text-stone-600 dark:text-amber-100 active:scale-90 transition-transform"
@@ -271,6 +283,18 @@ export function InventoryScreen({ onBack }: Props) {
           setShowForm(false);
         }}
         productCount={products.length}
+        currency={currency}
+      />
+
+      <AddStockDialog
+        open={!!addStockProduct}
+        product={addStockProduct}
+        currency={currency}
+        onClose={() => setAddStockProduct(null)}
+        onAdded={async () => {
+          await refreshInventory();
+          setAddStockProduct(null);
+        }}
       />
     </div>
   );
@@ -291,12 +315,13 @@ function StockBadge({ level, t }: { level: 'out' | 'low' | 'medium' | 'high'; t:
   );
 }
 
-function ProductForm({ open, editing, onClose, onSaved, productCount }: {
+function ProductForm({ open, editing, onClose, onSaved, productCount, currency }: {
   open: boolean;
   editing: Product | null;
   onClose: () => void;
   onSaved: () => void;
   productCount: number;
+  currency: string;
 }) {
   const { t } = useI18n();
   const { toast } = useAppToast();
@@ -456,7 +481,7 @@ function ProductForm({ open, editing, onClose, onSaved, productCount }: {
                       placeholder="0.00"
                       className="w-full px-3 py-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-white/80 dark:border-white/10 text-stone-800 dark:text-amber-50 font-semibold focus:outline-none focus:ring-2 focus:ring-amber-400"
                     />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-500 text-xs">LKR</span>
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-500 text-xs">{currency}</span>
                   </div>
                 </div>
                 <div>
@@ -471,7 +496,7 @@ function ProductForm({ open, editing, onClose, onSaved, productCount }: {
                       placeholder="0.00"
                       className="w-full px-3 py-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-white/80 dark:border-white/10 text-stone-800 dark:text-amber-50 font-semibold focus:outline-none focus:ring-2 focus:ring-amber-400"
                     />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-500 text-xs">LKR</span>
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-500 text-xs">{currency}</span>
                   </div>
                 </div>
               </div>
@@ -515,6 +540,111 @@ function ProductForm({ open, editing, onClose, onSaved, productCount }: {
                 className="glass-primary rounded-2xl py-2.5 font-bold text-white text-sm flex items-center justify-center gap-2 active:scale-95 transition-transform disabled:opacity-60"
               >
                 {saving ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <><Check size={14} /> {t('common.save')}</>}
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+// ─── Add Stock dialog (adds quantity to an existing product via adjustInventory) ─
+
+function AddStockDialog({ open, product, currency, onClose, onAdded }: {
+  open: boolean;
+  product: Product | null;
+  currency: string;
+  onClose: () => void;
+  onAdded: () => void;
+}) {
+  const { t } = useI18n();
+  const { toast } = useAppToast();
+  const [qty, setQty] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open) setQty('');
+  }, [open]);
+
+  const parseNum = (s: string) => { const n = parseFloat(s); return isFinite(n) && n > 0 ? n : 0; };
+
+  const handleSubmit = async () => {
+    if (!product) return;
+    const n = parseNum(qty);
+    if (n <= 0) {
+      toast({ title: t('inventory.addStockQty'), description: 'Enter a quantity greater than 0', variant: 'warning' });
+      return;
+    }
+    setSaving(true);
+    try {
+      await adjustInventory(product.id, n, 'manual');
+      toast({
+        title: t('inventory.stockAdded'),
+        description: t('inventory.stockAddedDesc', { qty: String(n), name: product.name }),
+        variant: 'success',
+      });
+      onAdded();
+    } catch (e: any) {
+      toast({ title: t('toast.error'), description: e?.message, variant: 'error' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <AnimatePresence>
+      {open && product && (
+        <motion.div
+          className="fixed inset-0 z-[110] flex items-center justify-center p-4"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+        >
+          <div className="absolute inset-0 bg-stone-900/40 backdrop-blur-sm" onClick={onClose} />
+          <motion.div
+            className="relative w-full max-w-sm glass-strong rounded-3xl p-5"
+            initial={{ scale: 0.95, opacity: 0.6 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 280 }}
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-9 h-9 rounded-xl glass-success flex items-center justify-center text-white">
+                <Plus size={16} />
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-stone-800 dark:text-amber-50">{t('inventory.addStockTitle')}</h2>
+                <p className="text-[10px] text-stone-500 dark:text-amber-100/60">{product.name}</p>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-stone-600 dark:text-amber-100/70 mb-3">{t('inventory.addStockDesc')}</p>
+
+            <label className="text-xs text-stone-600 dark:text-amber-100/70 mb-1 block">{t('inventory.addStockQty')}</label>
+            <input
+              type="number"
+              inputMode="numeric"
+              value={qty}
+              onChange={(e) => setQty(e.target.value)}
+              placeholder="0"
+              autoFocus
+              className="w-full px-3 py-2.5 rounded-xl bg-white/70 dark:bg-white/5 border border-white/80 dark:border-white/10 text-stone-800 dark:text-amber-50 font-semibold focus:outline-none focus:ring-2 focus:ring-amber-400"
+            />
+
+            <div className="grid grid-cols-2 gap-3 mt-4">
+              <button
+                onClick={onClose}
+                className="glass rounded-2xl py-2.5 font-semibold text-stone-700 dark:text-amber-100 text-sm active:scale-95 transition-transform"
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                onClick={handleSubmit}
+                disabled={saving}
+                className="glass-success rounded-2xl py-2.5 font-bold text-white text-sm flex items-center justify-center gap-2 active:scale-95 transition-transform disabled:opacity-60"
+              >
+                {saving ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <><Plus size={14} /> {t('inventory.addStock')}</>}
               </button>
             </div>
           </motion.div>

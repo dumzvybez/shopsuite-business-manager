@@ -1,17 +1,18 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import {
   Check, ChevronRight, ChevronLeft, Store, User, Palette, Lock, Coins,
   ShoppingBag, Calculator, BarChart3, Package, Truck, Image as ImageIcon,
+  Fingerprint, AlertTriangle, Loader2,
 } from 'lucide-react';
 import {
   useI18n, applyThemeAndBackground, saveSettings, todayStr, getProducts, saveProduct,
   type Settings, type Product,
 } from '@/lib/data-hooks-adapter';
 import { useAppToast } from './toast-provider';
-import { PinSetupDialog } from './app-lock';
+import { PinSetupDialog, BiometricSetupDialog } from './app-lock';
 import { THEMES, BACKGROUNDS, type ThemeId, type BackgroundId } from '@/lib/themes';
 import { CURRENCIES } from '@/lib/currencies';
 import { BUSINESS_TYPES } from '@/lib/business-types';
@@ -36,8 +37,28 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const [appLockEnabled, setAppLockEnabled] = useState(false);
   const [appLockPin, setAppLockPin] = useState<string | null>(null);
   const [appLockBiometric, setAppLockBiometric] = useState(false);
+  const [webauthnCredentialId, setWebauthnCredentialId] = useState<string | null>(null);
   const [showPinSetup, setShowPinSetup] = useState(false);
+  const [showBiometricSetup, setShowBiometricSetup] = useState(false);
+  const [biometricSupported, setBiometricSupported] = useState(false);
   const [useEggPreset, setUseEggPreset] = useState(false);
+
+  // Detect WebAuthn support once on mount so the biometric option can be
+  // shown/disabled appropriately (same check used in Settings + AppLock).
+  useEffect(() => {
+    (async () => {
+      if (typeof window === 'undefined' || !('PublicKeyCredential' in window)) {
+        setBiometricSupported(false);
+        return;
+      }
+      try {
+        const available = await (PublicKeyCredential as any).isUserVerifyingPlatformAuthenticatorAvailable?.();
+        setBiometricSupported(!!available);
+      } catch {
+        setBiometricSupported(false);
+      }
+    })();
+  }, []);
 
   const next = () => setStepIdx((i) => Math.min(i + 1, STEPS.length - 1));
   const prev = () => setStepIdx((i) => Math.max(i - 1, 0));
@@ -57,6 +78,35 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
     toast({ title: 'PIN set', variant: 'success' });
   };
 
+  // Biometric (WebAuthn) registration — reuses the SAME BiometricSetupDialog
+  // and registration logic as Settings. This is NOT a second implementation.
+  const handleBiometricToggle = (enabled: boolean) => {
+    if (enabled) {
+      if (!biometricSupported) {
+        toast({ title: 'Biometric unlock is not supported on this device/browser. PIN lock remains active.', variant: 'error' });
+        return;
+      }
+      setShowBiometricSetup(true);
+    } else {
+      setAppLockBiometric(false);
+      setWebauthnCredentialId(null);
+    }
+  };
+
+  const handleBiometricRegistered = (credentialId: string) => {
+    setShowBiometricSetup(false);
+    setAppLockBiometric(true);
+    setWebauthnCredentialId(credentialId);
+    toast({ title: 'Biometric unlock enabled', variant: 'success' });
+  };
+
+  const handleBiometricSetupCancel = () => {
+    setShowBiometricSetup(false);
+    // Revert the toggle since setup was cancelled — keeps state consistent.
+    setAppLockBiometric(false);
+    setWebauthnCredentialId(null);
+  };
+
   const finish = async () => {
     const patch: Partial<Settings> = {
       shopName: shopName.trim(),
@@ -69,6 +119,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
       appLockEnabled,
       appLockPin,
       appLockBiometric,
+      webauthnCredentialId, // registered during onboarding via BiometricSetupDialog
       tutorialDone: true,
       onboardingCompleted: true,
       installDate: todayStr(),
@@ -379,18 +430,37 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
 
                   {appLockEnabled && appLockPin && (
                     <>
-                      <label className="flex items-center justify-between p-3 glass rounded-xl cursor-pointer">
-                        <div>
-                          <p className="font-semibold text-sm text-stone-800 dark:text-amber-50">Biometric unlock</p>
-                          <p className="text-[10px] text-stone-500 dark:text-amber-100/60">Use fingerprint / face where supported</p>
+                      <div className={`glass rounded-xl p-3 ${!biometricSupported ? 'opacity-60' : ''}`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <div>
+                            <p className="font-semibold text-sm text-stone-800 dark:text-amber-50">Biometric unlock</p>
+                            <p className="text-[10px] text-stone-500 dark:text-amber-100/60">
+                              {biometricSupported ? 'Fingerprint / face unlock' : 'Not supported on this device/browser'}
+                            </p>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={appLockBiometric}
+                            disabled={!biometricSupported}
+                            onChange={(e) => handleBiometricToggle(e.target.checked)}
+                            className="w-5 h-5 rounded accent-amber-500"
+                          />
                         </div>
-                        <input
-                          type="checkbox"
-                          checked={appLockBiometric}
-                          onChange={(e) => setAppLockBiometric(e.target.checked)}
-                          className="w-5 h-5 rounded accent-amber-500"
-                        />
-                      </label>
+                        {appLockBiometric && biometricSupported && (
+                          <div className="flex items-center gap-1.5 mt-1.5 text-[10px] text-green-600 dark:text-green-400">
+                            <Fingerprint size={11} />
+                            <span>Biometric unlock configured — tap to re-register</span>
+                          </div>
+                        )}
+                        {appLockBiometric && (
+                          <button
+                            onClick={() => setShowBiometricSetup(true)}
+                            className="w-full mt-2 glass-info rounded-lg py-1.5 text-[10px] font-semibold text-white flex items-center justify-center gap-1 active:scale-95 transition-transform"
+                          >
+                            <Fingerprint size={11} /> {webauthnCredentialId ? 'Re-register biometric' : 'Set up biometric'}
+                          </button>
+                        )}
+                      </div>
                       <button
                         onClick={() => setShowPinSetup(true)}
                         className="w-full glass rounded-xl py-2.5 text-xs font-semibold text-stone-700 dark:text-amber-100 active:scale-95 transition-transform"
@@ -500,6 +570,12 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
           if (!appLockPin) setAppLockEnabled(false);
         }}
         onSaved={handlePinSaved}
+      />
+
+      <BiometricSetupDialog
+        open={showBiometricSetup}
+        onClose={handleBiometricSetupCancel}
+        onRegistered={handleBiometricRegistered}
       />
     </div>
   );

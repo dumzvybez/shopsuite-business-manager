@@ -2,12 +2,14 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
-import { ArrowLeft, Search, ChevronRight, X, Pencil, Trash2, FileBarChart, Download } from 'lucide-react';
+import { ArrowLeft, Search, ChevronRight, X, Pencil, Trash2, FileBarChart, Download, BarChart3 } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts';
 import {
   getDayRecordsForRange, getDayRecord, getSalesForDate, getPriceSessionsForDate,
+  getExpensesForDateRange, getDamagesForDate,
   setDayClosed, recalcDay, deleteSale, getCategories, useI18n,
-  todayStr, addDays, formatCurrency, formatNumber,
-  type DayRecord, type Sale, type PriceSession, type EggCategory,
+  todayStr, addDays, formatCurrency, formatNumber, formatQuantity,
+  type DayRecord, type Sale, type PriceSession, type EggCategory, type Expense, type DamageRecord,
 } from '@/lib/data-hooks-adapter';
 import { formatDate, formatDateShort, formatMonth } from '@/lib/sinhala';
 import { useAppToast } from './toast-provider';
@@ -179,7 +181,7 @@ export function DailyReportsScreen({ onBack, onEditDay, onOpenPdf, onOpenMonthly
                       <span className="px-2 py-0.5 rounded-full bg-stone-200/60 dark:bg-white/10 text-stone-600 dark:text-amber-100/70">{t('reports.closed')}</span>
                     ) : (
                       <>
-                        <span>{formatNumber((r.totalItems != null ? r.totalItems : (r as any).totalEggs))} 'eggs'</span>
+                        <span>{formatQuantity(r.totalItems != null ? r.totalItems : (r as any).totalEggs)} {t('common.units')}</span>
                         <span>·</span>
                         <span>{r.saleCount} {t('reports.salesCount')}</span>
                       </>
@@ -223,22 +225,28 @@ function DayDetailDrawer({ date, onClose, onEditDay, onChanged, currency }: {
   const [sales, setSales] = useState<Sale[]>([]);
   const [sessions, setSessions] = useState<PriceSession[]>([]);
   const [products, setCategories] = useState<EggCategory[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [damages, setDamages] = useState<DamageRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!date) return;
     (async () => {
       setLoading(true);
-      const [d, s, p, c] = await Promise.all([
+      const [d, s, p, c, exp, dmg] = await Promise.all([
         getDayRecord(date),
         getSalesForDate(date),
         getPriceSessionsForDate(date),
         getCategories(),
+        getExpensesForDateRange(date, date),
+        getDamagesForDate(date),
       ]);
       setDay(d);
       setSales(s);
       setSessions(p);
       setCategories(c);
+      setExpenses(exp);
+      setDamages(dmg);
       setLoading(false);
     })();
   }, [date]);
@@ -292,10 +300,14 @@ function DayDetailDrawer({ date, onClose, onEditDay, onChanged, currency }: {
             <div className="flex-1 overflow-y-auto scroll-area px-5 py-4 space-y-4">
               {/* Summary */}
               <div className="grid grid-cols-2 gap-2">
-                <SummaryBox label={t('reports.totalProfit')} value={day ? formatCurrency(day.totalProfit, currency) : '—'} color={day && day.totalProfit < 0 ? 'danger' : 'success'} />
-                <SummaryBox label={t('reports.totalSold')} value={day ? `${formatNumber((day.totalItems != null ? day.totalItems : (day as any).totalEggs))} $''`.trim() : `0 $''`.trim()} color="primary" />
                 <SummaryBox label={t('reports.totalSell')} value={day ? formatCurrency(day.totalSell, currency) : '—'} color="info" />
                 <SummaryBox label={t('reports.totalBuy')} value={day ? formatCurrency(day.totalBuy, currency) : '—'} color="muted" />
+                <SummaryBox label={t('reports.totalProfit')} value={day ? formatCurrency(day.totalProfit, currency) : '—'} color={day && day.totalProfit < 0 ? 'danger' : 'success'} />
+                <SummaryBox label={t('monthly.netProfit')} value={day ? formatCurrency(day.totalProfit - expenses.reduce((a, e) => a + e.amount, 0) - (day.totalDamageCost || 0), currency) : '—'} color={day && (day.totalProfit - expenses.reduce((a, e) => a + e.amount, 0) - (day.totalDamageCost || 0)) < 0 ? 'danger' : 'success'} />
+                <SummaryBox label={t('monthly.expenses')} value={formatCurrency(expenses.reduce((a, e) => a + e.amount, 0), currency)} color="muted" />
+                <SummaryBox label={t('monthly.damageImpact')} value={day ? formatCurrency(day.totalDamageCost || 0, currency) : '—'} color={day && (day.totalDamageCost || 0) > 0 ? 'danger' : 'muted'} />
+                <SummaryBox label={t('dashboard.cashAvailable')} value={day ? formatCurrency(day.totalSell - expenses.reduce((a, e) => a + e.amount, 0), currency) : '—'} color="primary" />
+                <SummaryBox label={t('reports.totalSold')} value={day ? formatQuantity(day.totalItems != null ? day.totalItems : (day as any).totalEggs) : '0'} color="primary" />
               </div>
 
               {/* Status */}
@@ -313,6 +325,92 @@ function DayDetailDrawer({ date, onClose, onEditDay, onChanged, currency }: {
                   {day?.status === 'closed' ? t('reports.markOpen') : t('reports.markClosed')}
                 </button>
               </div>
+
+              {/* Items Sold — per-product summary */}
+              {sales.length > 0 && (
+                <div>
+                  <h3 className="font-bold text-stone-800 dark:text-amber-50 mb-2">{t('reports.itemsSold')}</h3>
+                  <div className="glass rounded-2xl overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-stone-600 dark:text-amber-100/70 border-b border-white/20 dark:border-white/10">
+                          <th className="text-left py-2 px-3 font-semibold">{t('pdf.report.eggType')}</th>
+                          <th className="text-right py-2 px-3 font-semibold">{t('common.quantity')}</th>
+                          <th className="text-right py-2 px-3 font-semibold">{t('common.revenue')}</th>
+                          <th className="text-right py-2 px-3 font-semibold">{t('common.profit')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(() => {
+                          const byProduct = new Map<string, { qty: number; revenue: number; profit: number }>();
+                          for (const s of sales) {
+                            const cur = byProduct.get(s.productId) || { qty: 0, revenue: 0, profit: 0 };
+                            cur.qty += s.quantity;
+                            cur.revenue += s.sellPrice * s.quantity;
+                            cur.profit += s.profit;
+                            byProduct.set(s.productId, cur);
+                          }
+                          return Array.from(byProduct.entries()).map(([pid, v]) => {
+                            const cat = products.find((c) => c.id === pid);
+                            return (
+                              <tr key={pid} className="border-b border-white/10 dark:border-white/5 last:border-0">
+                                <td className="py-2 px-3 text-stone-800 dark:text-amber-50">
+                                  <span className="flex items-center gap-2">
+                                    <span className="w-2 h-3 rounded-full flex-shrink-0" style={{ background: cat?.color }} />
+                                    <span className="font-semibold">{cat?.name || pid}</span>
+                                  </span>
+                                </td>
+                                <td className="text-right py-2 px-3 text-stone-700 dark:text-amber-100 font-semibold">{formatQuantity(v.qty)}</td>
+                                <td className="text-right py-2 px-3 text-stone-700 dark:text-amber-100">{formatCurrency(v.revenue, currency)}</td>
+                                <td className={`text-right py-2 px-3 font-bold ${v.profit < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-400'}`}>{formatCurrency(v.profit, currency)}</td>
+                              </tr>
+                            );
+                          });
+                        })()}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Product sales chart */}
+              {sales.length > 0 && (() => {
+                const byProduct = new Map<string, { name: string; revenue: number; qty: number; color: string }>();
+                for (const s of sales) {
+                  const cat = products.find((c) => c.id === s.productId);
+                  const cur = byProduct.get(s.productId) || { name: cat?.name || s.productId, revenue: 0, qty: 0, color: cat?.color || '#f59e0b' };
+                  cur.revenue += s.sellPrice * s.quantity;
+                  cur.qty += s.quantity;
+                  byProduct.set(s.productId, cur);
+                }
+                const chartData = Array.from(byProduct.values()).sort((a, b) => b.revenue - a.revenue);
+                return (
+                  <div>
+                    <h3 className="font-bold text-stone-800 dark:text-amber-50 mb-2 flex items-center gap-1.5">
+                      <BarChart3 size={14} className="text-amber-500" /> {t('reports.productSalesChart')}
+                    </h3>
+                    <div className="glass rounded-2xl p-3 h-44">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={chartData} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,113,108,0.15)" vertical={false} />
+                          <XAxis dataKey="name" tick={{ fontSize: 9, fill: 'currentColor' }} axisLine={false} tickLine={false} className="text-stone-500" interval={0} angle={-15} textAnchor="end" height={40} />
+                          <YAxis tick={{ fontSize: 9, fill: 'currentColor' }} axisLine={false} tickLine={false} className="text-stone-500" />
+                          <Tooltip
+                            cursor={{ fill: 'rgba(245,158,11,0.1)' }}
+                            contentStyle={{ background: 'rgba(255,255,255,0.95)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '12px', fontSize: '11px' }}
+                            formatter={(v: any, n: any) => [n === 'revenue' ? formatCurrency(Number(v), currency) : formatQuantity(Number(v)), n === 'revenue' ? t('common.revenue') : t('common.quantity')]}
+                          />
+                          <Bar dataKey="revenue" radius={[4, 4, 0, 0]}>
+                            {chartData.map((entry, i) => (
+                              <Cell key={i} fill={entry.color} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Sales list */}
               <div>

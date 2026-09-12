@@ -309,7 +309,7 @@ function CreditForm({ open, onClose, onSaved, currency }: {
       await refresh();
       toast({
         title: t('credit.saved.title'),
-        description: t('credit.saved.desc', { name: customerName.trim(), amount: remaining.toFixed(2) }),
+        description: t('credit.saved.desc', { name: customerName.trim(), amount: formatCurrency(remaining, currency) }),
         variant: 'success',
       });
       onSaved();
@@ -533,7 +533,7 @@ function PaymentDialog({ record, onClose, onSaved, currency }: {
       } else {
         toast({
           title: t('credit.paymentRecorded'),
-          description: t('credit.paymentRecordedDesc', { amount: amountN.toFixed(2), remaining: newRemaining.toFixed(2) }),
+          description: t('credit.paymentRecordedDesc', { amount: formatCurrency(amountN, currency), remaining: formatCurrency(newRemaining, currency) }),
           variant: 'success',
         });
       }

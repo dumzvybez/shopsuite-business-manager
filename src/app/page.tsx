@@ -311,6 +311,7 @@ function AppInner() {
         <ProfitCalculatorScreen
           date={activeDate}
           onBack={() => navigate({ view: 'dashboard' })}
+          currency={currency}
         />
       )}
 
@@ -385,6 +386,7 @@ function AppInner() {
       {view === 'inventory' && wrapWithFooter(
         <InventoryScreen
           onBack={() => navigate({ view: 'dashboard' })}
+          currency={currency}
         />
       )}
 

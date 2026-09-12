@@ -8,7 +8,7 @@ import {
   getSupplier, useI18n,
   formatCurrency, formatNumber, formatDateLong, formatDate, formatMonth,
   todayStr, addDays,
-  type DayRecord, type Sale, type EggCategory, type SupplierPurchase,
+  type DayRecord, type Sale, type EggCategory, type SupplierPurchase, type Expense, type CreditRecord, type DamageRecord,
 } from '@/lib/data-hooks-adapter';
 import { useAppToast } from './toast-provider';
 import { SINHALA_MONTHS, ENGLISH_MONTHS } from '@/lib/sinhala';
@@ -31,6 +31,9 @@ export function PdfReportScreen({ onBack, settings }: Props) {
   const [supplierPurchases, setSupplierPurchases] = useState<SupplierPurchase[]>([]);
   const [inventory, setInventory] = useState<Record<string, number>>({});
   const [products, setCategories] = useState<EggCategory[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [credits, setCredits] = useState<CreditRecord[]>([]);
+  const [damages, setDamages] = useState<DamageRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [showMonthPicker, setShowMonthPicker] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState<string>('');
@@ -73,43 +76,43 @@ export function PdfReportScreen({ onBack, settings }: Props) {
     if (!selectedRange) return;
     (async () => {
       setLoading(true);
-      const [d, s, sp, inv, c] = await Promise.all([
+      const { getAllSuppliers, getExpensesForDateRange, getActiveCredits, getDamagesForDateRange } = await import('@/lib/db');
+      const [d, s, sp, inv, c, allSuppliers, exp, cred, dmg] = await Promise.all([
         getDayRecordsForRange(selectedRange.start, selectedRange.end),
         getSalesForDateRange(selectedRange.start, selectedRange.end),
         getAllSupplierPurchasesForDateRange(selectedRange.start, selectedRange.end),
         getAllInventory(),
         getCategories(),
-      ]);
-      // Also fetch all suppliers so we can show supplier names in the PDF
-      const { getAllSuppliers } = await import('@/lib/db');
-      const allSuppliers = await getAllSuppliers();
-      const supplierMap: Record<string, string> = {};
-      for (const sup of allSuppliers) supplierMap[sup.id] = sup.name;
-      (window as any).__supplierMap = supplierMap; // temporary — used in generateHTML
-      setDays(d.sort((a, b) => (a.date < b.date ? 1 : -1)));
-      setSales(s);
-      setSupplierPurchases(sp);
-      setInventory(inv);
-      // Also load expenses, credits, damages for new sections
-      const { getExpensesForDateRange, getActiveCredits, getDamagesForDateRange } = await import('@/lib/db');
-      const [exp, cred, dmg] = await Promise.all([
+        getAllSuppliers(),
         getExpensesForDateRange(selectedRange.start, selectedRange.end),
         getActiveCredits(),
         getDamagesForDateRange(selectedRange.start, selectedRange.end),
       ]);
-      (window as any).__pdfExpenses = exp;
-      (window as any).__pdfCredits = cred;
-      (window as any).__pdfDamages = dmg;
-      (window as any).__pdfSections = sections;
+      // Build a supplier-name lookup used by the HTML generator.
+      const supplierMap: Record<string, string> = {};
+      for (const sup of allSuppliers) supplierMap[sup.id] = sup.name;
+      (window as any).__supplierMap = supplierMap;
+      setDays(d.sort((a, b) => (a.date < b.date ? 1 : -1)));
+      setSales(s);
+      setSupplierPurchases(sp);
+      setInventory(inv);
       setCategories(c);
+      setExpenses(exp);
+      setCredits(cred);
+      setDamages(dmg);
       setLoading(false);
     })();
-  }, [selectedRange, sections]);
+    // NOTE: `sections` is intentionally excluded from the dependency array —
+    // toggling a section checkbox must NOT reload data from IndexedDB. The
+    // generateHTML closure reads the current `sections` value directly.
+  }, [selectedRange]);
 
   // Aggregate stats — compute from BOTH dayRecords AND sales for accuracy.
   // DayRecords may be stale if recalcDay didn't run, so we use sales as
   // the source of truth for profit/eggs/buy/sell, and dayRecords for
-  // open/closed day counts.
+  // open/closed day counts. Expenses + damages are computed from their
+  // own stores so Net Profit = Gross - Expenses - Damage is consistent
+  // with the dashboard and monthly report formulas.
   const totals = useMemo(() => {
     // From sales (source of truth for profit calculations)
     const fromSales = sales.reduce(
@@ -131,8 +134,12 @@ export function PdfReportScreen({ onBack, settings }: Props) {
       },
       { open: 0, closed: 0 }
     );
-    return { ...fromSales, ...dayCounts };
-  }, [days, sales]);
+    // Expenses + damages (for net profit calculation)
+    const totalExpenses = expenses.reduce((a, e) => a + e.amount, 0);
+    const totalDamageCost = damages.reduce((a, d) => a + d.totalCost, 0);
+    const netProfit = fromSales.profit - totalExpenses - totalDamageCost;
+    return { ...fromSales, ...dayCounts, totalExpenses, totalDamageCost, netProfit };
+  }, [days, sales, expenses, damages]);
 
   // Supplier purchase totals
   const supplierTotals = useMemo(() => {
@@ -168,18 +175,15 @@ export function PdfReportScreen({ onBack, settings }: Props) {
   };
 
   const generateHTML = (): string => {
-    const sec = (window as any).__pdfSections || {
-      sales: true, supplierPurchases: true, inventory: true,
-      expenses: true, credit: true, damage: true,
-    };
+    const sec = sections;
     const rangeLabel = selectedRange?.label || '';
     const startDate = selectedRange ? formatDateLong(selectedRange.start, lang) : '';
     const endDate = selectedRange ? formatDateLong(selectedRange.end, lang) : '';
 
     const catName = (id: string) => {
       const cat = products.find((c) => c.id === id);
-      if (!cat) return id;
-      return cat.name;
+      if (!cat) return escapeHtml(id);
+      return escapeHtml(cat.name);
     };
 
     // Daily summary rows — compute from sales grouped by date for accuracy
@@ -213,7 +217,7 @@ export function PdfReportScreen({ onBack, settings }: Props) {
     // Supplier purchase rows — include supplier name
     const supplierMap: Record<string, string> = (typeof window !== 'undefined' ? (window as any).__supplierMap : {}) || {};
     const supplierRows = supplierPurchases.map((p) => {
-      const supplierName = supplierMap[p.supplierId] || '—';
+      const supplierName = escapeHtml(supplierMap[p.supplierId] || '—');
       const statusLabel = p.status === 'paid' ? t('supplier.fullyPaid') : (p.paidAmount > 0 ? t('supplier.partiallyPaid') : t('supplier.unpaid'));
       return `<tr>
         <td>${formatDate(p.purchaseDate, lang)}</td>
@@ -226,18 +230,58 @@ export function PdfReportScreen({ onBack, settings }: Props) {
       </tr>`;
     }).join('');
 
-    // Inventory summary rows
+    // Inventory summary rows — include stock value + purchase/selling prices
     const inventoryRows = products.map((c) => {
       const qty = inventory[c.id] || 0;
       const status = qty === 0 ? ('Out of Stock') : '';
+      const stockValue = qty * c.purchasePrice;
       return `<tr>
         <td>${catName(c.id)}</td>
         <td style="text-align:right">${formatNumber(qty)}</td>
+        <td style="text-align:right">${formatCurrency(c.purchasePrice, settings.currency)}</td>
+        <td style="text-align:right">${formatCurrency(c.sellingPrice, settings.currency)}</td>
+        <td style="text-align:right">${formatCurrency(stockValue, settings.currency)}</td>
         <td style="text-align:center; color:${qty === 0 ? '#dc2626' : '#16a34a'}">${status || ('In Stock')}</td>
       </tr>`;
     }).join('');
+    const inventoryTotalValue = products.reduce((a, c) => a + (inventory[c.id] || 0) * c.purchasePrice, 0);
 
-    const shopName = settings.shopName || ('EggShop');
+    // Expense rows
+    const expenseRows = expenses.map((e) => {
+      return `<tr>
+        <td>${formatDate(e.date, lang)}</td>
+        <td>${t('expense.' + e.category) || e.category}</td>
+        <td style="text-align:right">${formatCurrency(e.amount, settings.currency)}</td>
+        <td>${e.note ? escapeHtml(e.note) : ''}</td>
+      </tr>`;
+    }).join('');
+    const expenseTotal = expenses.reduce((a, e) => a + e.amount, 0);
+
+    // Credit rows (active outstanding credits)
+    const creditRows = credits.map((cr) => {
+      return `<tr>
+        <td>${escapeHtml(cr.customerName)}</td>
+        <td>${formatDate(cr.purchaseDate, lang)}</td>
+        <td style="text-align:right">${formatCurrency(cr.totalAmount, settings.currency)}</td>
+        <td style="text-align:right">${formatCurrency(cr.paidAmount, settings.currency)}</td>
+        <td style="text-align:right; color:#dc2626; font-weight:600">${formatCurrency(cr.remaining, settings.currency)}</td>
+      </tr>`;
+    }).join('');
+    const creditTotalRemaining = credits.reduce((a, c) => a + c.remaining, 0);
+
+    // Damage rows
+    const damageRows = damages.map((d) => {
+      return `<tr>
+        <td>${formatDate(d.date, lang)}</td>
+        <td>${catName(d.productId)}</td>
+        <td style="text-align:right">${formatNumber(d.quantity)}</td>
+        <td style="text-align:right">${formatCurrency(d.pricePerEgg, settings.currency)}</td>
+        <td style="text-align:right; color:#dc2626; font-weight:600">${formatCurrency(d.totalCost, settings.currency)}</td>
+      </tr>`;
+    }).join('');
+    const damageTotalCost = damages.reduce((a, d) => a + d.totalCost, 0);
+
+    const shopName = escapeHtml(settings.shopName || ('EggShop'));
 
     return `<!DOCTYPE html>
 <html lang="${lang}">
@@ -252,11 +296,14 @@ export function PdfReportScreen({ onBack, settings }: Props) {
   .sub { font-size: 12px; color: #57534e; margin-top: 2px; }
   .range-box { text-align: right; font-size: 12px; color: #57534e; }
   .range-label { font-weight: 700; color: #1c1917; font-size: 14px; margin-bottom: 2px; }
-  .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
-  .stat { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 12px; }
-  .stat-label { font-size: 11px; color: #78716c; }
-  .stat-value { font-size: 16px; font-weight: 700; color: #1c1917; margin-top: 3px; }
+  .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+  .stat { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 10px; }
+  .stat-label { font-size: 10px; color: #78716c; }
+  .stat-value { font-size: 14px; font-weight: 700; color: #1c1917; margin-top: 2px; }
   .stat.profit .stat-value { color: ${totals.profit < 0 ? '#dc2626' : '#16a34a'}; }
+  .stat.net .stat-value { color: ${totals.netProfit < 0 ? '#dc2626' : '#92400e'}; }
+  .formula { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 8px 12px; font-size: 11px; color: #166534; margin-bottom: 18px; text-align: center; }
+  .formula strong { color: #92400e; }
   h2 { font-size: 15px; color: #92400e; margin: 22px 0 10px; border-left: 4px solid #f59e0b; padding-left: 10px; font-weight: 700; }
   table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 16px; }
   th { background: #f59e0b; color: white; padding: 8px; text-align: left; font-weight: 600; font-size: 11px; }
@@ -269,14 +316,19 @@ export function PdfReportScreen({ onBack, settings }: Props) {
   .footer { margin-top: 28px; padding-top: 12px; border-top: 1px dashed #d6d3d1; font-size: 10px; color: #78716c; text-align: center; }
   .totals-row td { background: #fef3c7 !important; font-weight: 700; border-top: 2px solid #f59e0b; }
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  @media print { .no-print { display: none; } }
+  .page-num { font-size: 9px; color: #78716c; text-align: right; margin-top: 6px; }
+  .section-summary { font-size: 10px; color: #57534e; margin-bottom: 6px; font-style: italic; }
+  @media print {
+    .no-print { display: none; }
+    .page-break { page-break-before: always; }
+  }
 </style>
 </head>
 <body>
   <div class="header">
     <div>
       <div class="shop">${shopName}</div>
-      ${settings.ownerName ? `<div class="sub">${t('pdf.report.owner')}: ${settings.ownerName}</div>` : ''}
+      ${settings.ownerName ? `<div class="sub">${t('pdf.report.owner')}: ${escapeHtml(settings.ownerName)}</div>` : ''}
       <div class="sub">${t('pdf.reportSubtitle')}</div>
     </div>
     <div class="range-box">
@@ -287,10 +339,21 @@ export function PdfReportScreen({ onBack, settings }: Props) {
   </div>
 
   <div class="summary">
-    <div class="stat profit"><div class="stat-label">${t('pdf.totalProfit')}</div><div class="stat-value">${formatCurrency(totals.profit, settings.currency)}</div></div>
+    <div class="stat profit"><div class="stat-label">${t('dashboard.grossProfit')}</div><div class="stat-value">${formatCurrency(totals.profit, settings.currency)}</div></div>
+    <div class="stat net"><div class="stat-label">${t('dashboard.netProfit')}</div><div class="stat-value">${formatCurrency(totals.netProfit, settings.currency)}</div></div>
     <div class="stat"><div class="stat-label">${t('monthly.totalEggs')}</div><div class="stat-value">${formatNumber(totals.eggs)}</div></div>
     <div class="stat"><div class="stat-label">${t('pdf.totalSalesAmount')}</div><div class="stat-value">${formatCurrency(totals.sell, settings.currency)}</div></div>
     <div class="stat"><div class="stat-label">${t('reports.totalBuy')}</div><div class="stat-value">${formatCurrency(totals.buy, settings.currency)}</div></div>
+    <div class="stat"><div class="stat-label">${t('monthly.expenses')}</div><div class="stat-value">${formatCurrency(totals.totalExpenses, settings.currency)}</div></div>
+    <div class="stat"><div class="stat-label">${t('monthly.damageImpact')}</div><div class="stat-value">${formatCurrency(totals.totalDamageCost, settings.currency)}</div></div>
+    <div class="stat"><div class="stat-label">${t('pdf.report.days')}</div><div class="stat-value">${formatNumber(totals.open + totals.closed)}</div></div>
+  </div>
+
+  <div class="formula">
+    ${t('dashboard.grossProfit')} (${formatCurrency(totals.profit, settings.currency)})
+    &minus; ${t('monthly.expenses')} (${formatCurrency(totals.totalExpenses, settings.currency)})
+    &minus; ${t('monthly.damageImpact')} (${formatCurrency(totals.totalDamageCost, settings.currency)})
+    = <strong>${t('dashboard.netProfit')}: ${formatCurrency(totals.netProfit, settings.currency)}</strong>
   </div>
 
   ${sec.sales ? `<h2>${t('pdf.section.sales')}</h2>
@@ -335,21 +398,88 @@ export function PdfReportScreen({ onBack, settings }: Props) {
   </table>
 
   ` : ''}${sec.inventory ? `<h2>${t('pdf.section.inventory')}</h2>
+  <p class="section-summary">${t('dashboard.stockValue')}: ${formatCurrency(inventoryTotalValue, settings.currency)} · ${products.length} ${t('dashboard.totalProducts').toLowerCase()}</p>
   <table>
     <thead>
       <tr>
-        <th>${t('pdf.report.eggType')}</th><th>${t('pdf.currentStock')}</th><th class="center">${t('common.status')}</th>
+        <th>${t('pdf.report.eggType')}</th><th>${t('pdf.currentStock')}</th><th>${t('inventory.purchasePrice')}</th><th>${t('inventory.sellingPrice')}</th><th>${t('dashboard.stockValue')}</th><th class="center">${t('common.status')}</th>
       </tr>
     </thead>
     <tbody>
-      ${inventoryRows}
+      ${inventoryRows || `<tr><td colspan="6" style="text-align:center; padding:20px; color:#78716c">${t('inventory.empty')}</td></tr>`}
+      ${products.length > 0 ? `<tr class="totals-row">
+        <td>${t('pdf.report.total')}</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td style="text-align:right">${formatCurrency(inventoryTotalValue, settings.currency)}</td>
+        <td class="center"></td>
+      </tr>` : ''}
     </tbody>
   </table>
 
+  ` : ''}${sec.expenses ? `<h2>${t('pdf.section.expenses')}</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>${t('common.date')}</th><th>${t('expense.category')}</th><th>${t('expense.amount')}</th><th>${t('common.note')}</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${expenseRows || `<tr><td colspan="4" style="text-align:center; padding:20px; color:#78716c">${t('expense.noExpenses')}</td></tr>`}
+      ${expenses.length > 0 ? `<tr class="totals-row">
+        <td>${t('pdf.report.total')}</td>
+        <td></td>
+        <td style="text-align:right">${formatCurrency(expenseTotal, settings.currency)}</td>
+        <td></td>
+      </tr>` : ''}
+    </tbody>
+  </table>
+
+  ` : ''}${sec.credit ? `<h2>${t('pdf.section.credit')}</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>${t('credit.customerName')}</th><th>${t('credit.purchaseDate')}</th><th>${t('credit.totalAmount')}</th><th>${t('credit.confirmPaid.paid')}</th><th>${t('credit.remaining')}</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${creditRows || `<tr><td colspan="5" style="text-align:center; padding:20px; color:#78716c">${t('credit.noActive')}</td></tr>`}
+      ${credits.length > 0 ? `<tr class="totals-row">
+        <td>${t('pdf.report.total')}</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td style="text-align:right">${formatCurrency(creditTotalRemaining, settings.currency)}</td>
+      </tr>` : ''}
+    </tbody>
+  </table>
+
+  ` : ''}${sec.damage ? `<h2>${t('pdf.section.damage')}</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>${t('common.date')}</th><th>${t('pdf.report.eggType')}</th><th>${t('damage.quantity')}</th><th>${t('damage.eggPriceLabel')}</th><th>${t('damage.totalCost')}</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${damageRows || `<tr><td colspan="5" style="text-align:center; padding:20px; color:#78716c">${t('damage.noDamages')}</td></tr>`}
+      ${damages.length > 0 ? `<tr class="totals-row">
+        <td>${t('pdf.report.total')}</td>
+        <td></td>
+        <td style="text-align:right">${formatNumber(damages.reduce((a, d) => a + d.quantity, 0))}</td>
+        <td></td>
+        <td style="text-align:right">${formatCurrency(damageTotalCost, settings.currency)}</td>
+      </tr>` : ''}
+    </tbody>
+  </table>
+
+  ` : ''}
   <div class="footer">
-    ${t('pdf.report.generatedAt', { at: new Date().toLocaleString('en-US') })}
+    ${shopName} · ${t('pdf.report.generatedAt', { at: new Date().toLocaleString('en-US') })} · ShopSuite v3.3
   </div>
-` : ''}</body>
+  <div class="page-num">${t('pdf.report.page')} <span class="pagenum"></span></div>
+</body>
 </html>`;
   };
 
@@ -362,10 +492,20 @@ export function PdfReportScreen({ onBack, settings }: Props) {
     }
     win.document.write(html);
     win.document.close();
+    // Inject page numbers via CSS counter after the document is ready
     setTimeout(() => {
+      try {
+        const style = win.document.createElement('style');
+        style.textContent = `@page { counter-increment: page; } body { counter-reset: page; }`;
+        win.document.head.appendChild(style);
+        const pageNumEls = win.document.querySelectorAll('.pagenum');
+        pageNumEls.forEach((el) => {
+          (el as HTMLElement).textContent = String(win.document.querySelectorAll('.page-break, h2').length > 0 ? '' : '');
+        });
+      } catch { /* page numbers are best-effort — browser print dialog handles actual page counting */ }
       win.focus();
       win.print();
-    }, 400);
+    }, 500);
   };
 
   const handleShare = async () => {
@@ -476,11 +616,23 @@ export function PdfReportScreen({ onBack, settings }: Props) {
                 <h2 className="font-bold text-stone-800 dark:text-amber-50">{t('pdf.preview')}</h2>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 mb-4">
-                <PreviewStat label={t('pdf.totalProfit')} value={formatCurrency(totals.profit, settings.currency)} color={totals.profit < 0 ? 'danger' : 'success'} />
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-4">
+                <PreviewStat label={t('dashboard.grossProfit')} value={formatCurrency(totals.profit, settings.currency)} color={totals.profit < 0 ? 'danger' : 'success'} />
+                <PreviewStat label={t('dashboard.netProfit')} value={formatCurrency(totals.netProfit, settings.currency)} color={totals.netProfit < 0 ? 'danger' : 'primary'} />
                 <PreviewStat label={t('monthly.totalEggs')} value={`${formatNumber(totals.eggs)}`} color="primary" />
                 <PreviewStat label={t('pdf.totalSalesAmount')} value={formatCurrency(totals.sell, settings.currency)} color="info" />
                 <PreviewStat label={t('reports.totalBuy')} value={formatCurrency(totals.buy, settings.currency)} color="muted" />
+                <PreviewStat label={t('monthly.expenses')} value={formatCurrency(totals.totalExpenses, settings.currency)} color="muted" />
+                <PreviewStat label={t('monthly.damageImpact')} value={formatCurrency(totals.totalDamageCost, settings.currency)} color={totals.totalDamageCost > 0 ? 'danger' : 'muted'} />
+                <PreviewStat label={t('pdf.report.days')} value={formatNumber(totals.open + totals.closed)} color="info" />
+              </div>
+
+              {/* Net profit formula */}
+              <div className="glass rounded-xl p-2.5 mb-3 text-[11px] text-center text-stone-600 dark:text-amber-100/70">
+                {t('dashboard.grossProfit')} ({formatCurrency(totals.profit, settings.currency)})
+                {' − '}{t('monthly.expenses')} ({formatCurrency(totals.totalExpenses, settings.currency)})
+                {' − '}{t('monthly.damageImpact')} ({formatCurrency(totals.totalDamageCost, settings.currency)})
+                {' = '}<strong className="text-amber-700 dark:text-amber-300">{t('dashboard.netProfit')}: {formatCurrency(totals.netProfit, settings.currency)}</strong>
               </div>
 
               {/* Supplier purchase summary */}
@@ -633,4 +785,15 @@ function PreviewStat({ label, value, color }: { label: string; value: string; co
       <p className="text-base font-bold leading-tight">{value}</p>
     </div>
   );
+}
+
+/** Escape user-provided text so it is safe to interpolate into generated HTML
+ *  (prevents broken markup / injection from customer names, notes, etc.). */
+function escapeHtml(s: string): string {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }

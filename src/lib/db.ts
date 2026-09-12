@@ -28,6 +28,7 @@
  */
 
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+import { getCurrency, currencyDecimals } from './currencies';
 
 // ---------- Types ----------
 
@@ -228,6 +229,7 @@ export type Settings = {
   appLockEnabled: boolean;
   appLockPin: string | null;       // 4-8 digit numeric PIN (stored locally only)
   appLockBiometric: boolean;       // use WebAuthn / device auth where available
+  webauthnCredentialId: string | null; // base64-encoded WebAuthn credential ID for biometric unlock
   schemaVersion: number;
 };
 
@@ -309,7 +311,7 @@ export const DEFAULT_SETTINGS: Settings = {
   onboardingCompleted: false,
   dailyPriceDoneDate: null,
   lastBackupAt: null,
-  autoBackupEnabled: true,
+  autoBackupEnabled: false,
   autoBackupFrequency: 'daily',
   lastAutoBackupAt: null,
   installDate: null,
@@ -318,6 +320,7 @@ export const DEFAULT_SETTINGS: Settings = {
   appLockEnabled: false,
   appLockPin: null,
   appLockBiometric: false,
+  webauthnCredentialId: null,
   schemaVersion: 8,
 };
 
@@ -464,6 +467,30 @@ export async function saveSettings(patch: Partial<Settings>): Promise<Settings> 
     localStorage.setItem('shop-manager-settings', JSON.stringify(mirror));
   } catch { /* ignore */ }
   return next;
+}
+
+/**
+ * Format a monetary value using the user's configured currency.
+ * Used internally for audit-log summaries and error messages so that
+ * stored edit history reflects the actual currency symbol + decimals
+ * (e.g. JPY shows 0 decimals, LKR shows 2). Falls back to a plain
+ * number if settings cannot be read.
+ */
+async function fmtMoney(n: number): Promise<string> {
+  try {
+    const s = await getSettings();
+    const c = getCurrency(s.currency);
+    const formatted = Math.abs(n).toLocaleString('en-US', {
+      minimumFractionDigits: c.decimals,
+      maximumFractionDigits: c.decimals,
+    });
+    const sign = n < 0 ? '-' : '';
+    return c.position === 'before'
+      ? `${sign}${c.symbol} ${formatted}`
+      : `${sign}${formatted} ${c.symbol}`;
+  } catch {
+    return String(n);
+  }
 }
 
 // ---------- Products ----------
@@ -618,7 +645,7 @@ export async function saveSale(sale: Sale): Promise<void> {
     entity: 'sale',
     entityId: sale.id,
     action: 'create',
-    summary: `Sold ${sale.quantity} on ${sale.date} (profit LKR ${sale.profit.toFixed(2)})`,
+    summary: `Sold ${sale.quantity} on ${sale.date} (profit ${await fmtMoney(sale.profit)})`,
     at: Date.now(),
   });
   await recalcDay(sale.date);
@@ -795,7 +822,7 @@ export async function saveCredit(credit: CreditRecord): Promise<void> {
     entity: 'credit',
     entityId: credit.id,
     action: 'create',
-    summary: `Credit added: ${credit.customerName} — remaining LKR ${credit.remaining.toFixed(2)}`,
+    summary: `Credit added: ${credit.customerName} — remaining ${await fmtMoney(credit.remaining)}`,
     at: Date.now(),
   });
 }
@@ -809,7 +836,7 @@ export async function recordCreditPayment(
   if (!c) throw new Error('Credit record not found');
   if (amount <= 0) throw new Error('Payment amount must be positive');
   if (amount > c.remaining + 0.01) {
-    throw new Error(`Payment exceeds remaining balance (LKR ${c.remaining.toFixed(2)})`);
+    throw new Error(`Payment exceeds remaining balance (${await fmtMoney(c.remaining)})`);
   }
   const movedToPaid = c.remaining - amount <= 0.01;
   c.paidAmount += amount;
@@ -835,7 +862,7 @@ export async function recordCreditPayment(
     entity: 'credit',
     entityId: creditId,
     action: 'mark-paid',
-    summary: `Credit payment: ${c.customerName} — LKR ${amount.toFixed(2)}${movedToPaid ? ' (fully paid)' : ''}`,
+    summary: `Credit payment: ${c.customerName} — ${await fmtMoney(amount)}${movedToPaid ? ' (fully paid)' : ''}`,
     at: Date.now(),
   });
 
@@ -970,7 +997,7 @@ export async function saveExpense(expense: Expense): Promise<void> {
     entity: 'expense',
     entityId: expense.id,
     action: 'create',
-    summary: `Expense added: ${expense.category} — LKR ${expense.amount.toFixed(2)}`,
+    summary: `Expense added: ${expense.category} — ${await fmtMoney(expense.amount)}`,
     at: Date.now(),
   });
 }
@@ -1018,7 +1045,7 @@ export async function saveDamage(damage: DamageRecord): Promise<void> {
     entity: 'damage',
     entityId: damage.id,
     action: 'create',
-    summary: `Damaged stock: ${damage.quantity} — LKR ${damage.totalCost.toFixed(2)}`,
+    summary: `Damaged stock: ${damage.quantity} — ${await fmtMoney(damage.totalCost)}`,
     at: Date.now(),
   });
   await recalcDay(damage.date);
@@ -1208,7 +1235,7 @@ export async function saveSupplierPurchase(
     entity: 'supplierPurchase',
     entityId: purchase.id,
     action: 'create',
-    summary: `Supplier purchase: ${purchase.quantity} units, LKR ${purchase.totalCost.toFixed(2)} (paid LKR ${paid.toFixed(2)})`,
+    summary: `Supplier purchase: ${purchase.quantity} units, ${await fmtMoney(purchase.totalCost)} (paid ${await fmtMoney(paid)})`,
     at: Date.now(),
   });
   return finalPurchase;
@@ -1256,7 +1283,7 @@ export async function saveSupplierPayment(
   if (!purchase) throw new Error('Purchase not found');
   if (payment.amount <= 0) throw new Error('Payment amount must be positive');
   if (payment.amount > purchase.remaining + 0.01) {
-    throw new Error(`Payment exceeds remaining balance (LKR ${purchase.remaining.toFixed(2)})`);
+    throw new Error(`Payment exceeds remaining balance (${await fmtMoney(purchase.remaining)})`);
   }
   purchase.paidAmount += payment.amount;
   purchase.remaining = Math.max(0, purchase.totalCost - purchase.paidAmount);
@@ -1271,7 +1298,7 @@ export async function saveSupplierPayment(
     entity: 'supplierPayment',
     entityId: payment.id,
     action: 'create',
-    summary: `Payment LKR ${payment.amount.toFixed(2)} for purchase ${payment.purchaseId}`,
+    summary: `Payment ${await fmtMoney(payment.amount)} for purchase ${payment.purchaseId}`,
     at: Date.now(),
   });
   return { payment, purchase };
@@ -1390,11 +1417,25 @@ export async function exportBackup(): Promise<string> {
   for (const k of metaKeys) {
     meta[k as string] = await db.get('meta', k);
   }
+  // SECURITY: Strip secrets from the exported backup. The PIN and WebAuthn
+  // credential ID must NEVER leave the device in a backup file — they are
+  // device-specific security credentials. Restoring a backup on another
+  // device should require re-setting up App Lock.
+  const safeSettings = settings ? { ...settings } : settings;
+  if (safeSettings) {
+    delete safeSettings.appLockPin;
+    delete safeSettings.webauthnCredentialId;
+    // Keep appLockEnabled + appLockBiometric flags so the user knows they had
+    // lock enabled, but the actual PIN/credential must be re-created on restore.
+    // We set appLockEnabled to false on restore to avoid a lockout with no PIN.
+    safeSettings.appLockEnabled = false;
+    safeSettings.appLockBiometric = false;
+  }
   const payload = {
     app: 'shop-manager',
     version: 7,
     exportedAt: new Date().toISOString(),
-    settings, products, priceSessions, sales, dayRecords, credits, creditPayments,
+    settings: safeSettings, products, priceSessions, sales, dayRecords, credits, creditPayments,
     suppliers, supplierPurchases, supplierPayments, inventory,
     expenses, damages, stockMovements,
     editHistory, meta,
@@ -1405,9 +1446,40 @@ export async function exportBackup(): Promise<string> {
 
 export async function importBackup(jsonStr: string): Promise<void> {
   const db = await getDB();
-  const payload = JSON.parse(jsonStr);
-  if (payload.app !== 'shop-manager' && payload.app !== 'eggshop' && payload.app !== 'biththara-kade') {
-    throw new Error('Invalid backup file');
+  let payload: any;
+  try {
+    payload = JSON.parse(jsonStr);
+  } catch {
+    throw new Error('The selected file is not valid JSON. Please choose a ShopSuite backup file.');
+  }
+  // Validate backup structure
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invalid backup file: not a valid JSON object.');
+  }
+  const validApps = ['shop-manager', 'eggshop', 'biththara-kade'];
+  if (!validApps.includes(payload.app)) {
+    throw new Error('This file is not a ShopSuite backup. The file identifier is missing or incorrect.');
+  }
+  // Ensure data arrays exist (defensive — missing arrays become empty)
+  const dataKeys = ['products', 'priceSessions', 'sales', 'dayRecords', 'credits', 'creditPayments', 'suppliers', 'supplierPurchases', 'supplierPayments', 'inventory', 'expenses', 'damages', 'stockMovements', 'editHistory'];
+  for (const k of dataKeys) {
+    if (payload[k] != null && !Array.isArray(payload[k])) {
+      throw new Error(`Invalid backup file: field "${k}" is not an array.`);
+    }
+    if (payload[k] == null) payload[k] = [];
+  }
+  if (payload.settings != null && typeof payload.settings !== 'object') {
+    throw new Error('Invalid backup file: settings is not an object.');
+  }
+  // SECURITY: Ensure no PIN/credential leaks into the restored settings.
+  // Even if a maliciously-crafted backup contains them, we strip them.
+  if (payload.settings) {
+    delete payload.settings.appLockPin;
+    delete payload.settings.webauthnCredentialId;
+    // Force App Lock off on restore — the PIN was stripped, so enabling
+    // lock without a PIN would cause a lockout.
+    payload.settings.appLockEnabled = false;
+    payload.settings.appLockBiometric = false;
   }
   const tx = db.transaction(
     ['settings', 'products', 'priceSessions', 'sales', 'dayRecords', 'credits', 'creditPayments', 'suppliers', 'supplierPurchases', 'supplierPayments', 'inventory', 'expenses', 'damages', 'stockMovements', 'editHistory', 'meta'],
@@ -1579,13 +1651,14 @@ export async function exportSalesCSV(start: string, end: string): Promise<string
   const sales = await getSalesForDateRange(start, end);
   const products = await getProducts();
   const prodName = (id: string) => products.find((p) => p.id === id)?.name || id;
+  const dec = currencyDecimals((await getSettings()).currency);
   const rows = sales.map((s) => ({
     date: s.date,
     product: prodName(s.productId),
     quantity: s.quantity,
-    buyPrice: s.buyPrice.toFixed(2),
-    sellPrice: s.sellPrice.toFixed(2),
-    profit: s.profit.toFixed(2),
+    buyPrice: s.buyPrice.toFixed(dec),
+    sellPrice: s.sellPrice.toFixed(dec),
+    profit: s.profit.toFixed(dec),
     session: s.sessionIndex + 1,
   }));
   return toCSV(rows, [
@@ -1603,13 +1676,14 @@ export async function exportSalesCSV(start: string, end: string): Promise<string
 export async function exportInventoryCSV(): Promise<string> {
   const products = await getProducts();
   const inv = await getAllInventory();
+  const dec = currencyDecimals((await getSettings()).currency);
   const rows = products.map((p) => ({
     name: p.name,
     category: p.category,
     unit: p.unit,
     stock: inv[p.id] || 0,
-    purchasePrice: p.purchasePrice.toFixed(2),
-    sellingPrice: p.sellingPrice.toFixed(2),
+    purchasePrice: p.purchasePrice.toFixed(dec),
+    sellingPrice: p.sellingPrice.toFixed(dec),
     reorderThreshold: p.reorderThreshold,
   }));
   return toCSV(rows, [
@@ -1626,10 +1700,11 @@ export async function exportInventoryCSV(): Promise<string> {
 /** Export expenses as CSV. */
 export async function exportExpensesCSV(start: string, end: string): Promise<string> {
   const expenses = await getExpensesForDateRange(start, end);
+  const dec = currencyDecimals((await getSettings()).currency);
   const rows = expenses.map((e) => ({
     date: e.date,
     category: e.category,
-    amount: e.amount.toFixed(2),
+    amount: e.amount.toFixed(dec),
     note: e.note || '',
   }));
   return toCSV(rows, [
@@ -1643,12 +1718,13 @@ export async function exportExpensesCSV(start: string, end: string): Promise<str
 /** Export customer credits as CSV. */
 export async function exportCreditsCSV(): Promise<string> {
   const credits = await getAllCredits();
+  const dec = currencyDecimals((await getSettings()).currency);
   const rows = credits.map((c) => ({
     customer: c.customerName,
     date: c.purchaseDate,
-    total: c.totalAmount.toFixed(2),
-    paid: c.paidAmount.toFixed(2),
-    remaining: c.remaining.toFixed(2),
+    total: c.totalAmount.toFixed(dec),
+    paid: c.paidAmount.toFixed(dec),
+    remaining: c.remaining.toFixed(dec),
     status: c.status,
   }));
   return toCSV(rows, [
@@ -1668,15 +1744,16 @@ export async function exportSupplierPurchasesCSV(start: string, end: string): Pr
   const products = await getProducts();
   const supName = (id: string) => suppliers.find((s) => s.id === id)?.name || id;
   const prodName = (id: string) => products.find((p) => p.id === id)?.name || id;
+  const dec = currencyDecimals((await getSettings()).currency);
   const rows = purchases.map((p) => ({
     date: p.purchaseDate,
     supplier: supName(p.supplierId),
     product: prodName(p.productId),
     quantity: p.quantity,
-    pricePerUnit: p.pricePerEgg.toFixed(2),
-    totalCost: p.totalCost.toFixed(2),
-    paidAmount: p.paidAmount.toFixed(2),
-    remaining: p.remaining.toFixed(2),
+    pricePerUnit: p.pricePerEgg.toFixed(dec),
+    totalCost: p.totalCost.toFixed(dec),
+    paidAmount: p.paidAmount.toFixed(dec),
+    remaining: p.remaining.toFixed(dec),
     status: p.status,
   }));
   return toCSV(rows, [
@@ -1709,8 +1786,8 @@ export type MonthSummary = {
   averageDailyProfit: number;
   bestDay: { date: string; profit: number } | null;
   worstDay: { date: string; profit: number } | null;
-  perProduct: { productId: string; totalItems: number; totalProfit: number }[];
-  perCategory: { productId: string; totalItems: number; totalProfit: number }[]; // legacy alias kept
+  perProduct: { productId: string; totalItems: number; totalSell: number; totalBuy: number; totalProfit: number }[];
+  perCategory: { productId: string; totalItems: number; totalSell: number; totalBuy: number; totalProfit: number }[]; // legacy alias kept
 };
 
 export async function getMonthSummary(month: string): Promise<MonthSummary> {
@@ -1749,6 +1826,8 @@ export async function getMonthSummary(month: string): Promise<MonthSummary> {
     return {
       productId: p.id,
       totalItems: ps.reduce((a, s) => a + s.quantity, 0),
+      totalSell: ps.reduce((a, s) => a + s.sellPrice * s.quantity, 0),
+      totalBuy: ps.reduce((a, s) => a + s.buyPrice * s.quantity, 0),
       totalProfit: ps.reduce((a, s) => a + s.profit, 0),
     };
   });
@@ -1788,23 +1867,29 @@ export type DashboardStats = {
   customerDue: number;
   // Today
   todaySales: number;          // total sell today
-  todayProfit: number;
+  todayProfit: number;          // gross profit today (Σ sale.profit)
+  todayNetProfit: number;       // today gross profit - today expenses - today damage
   todayItems: number;
   // Month
   monthSales: number;
-  monthProfit: number;
+  monthProfit: number;         // gross profit this month
   monthExpenses: number;
   monthDamageCost: number;
   monthNetProfit: number;
-  // Yesterday & last month for comparison
-  yesterdayProfit: number;
-  lastMonthProfit: number;
+  // Yesterday & last month for comparison (NET profit for business health)
+  yesterdayProfit: number;       // gross profit yesterday (kept for compat)
+  yesterdayNetProfit: number;    // net profit yesterday
+  lastMonthProfit: number;       // gross profit last month (kept for compat)
+  lastMonthNetProfit: number;    // net profit last month
   // Stock alerts
   lowStockCount: number;
   outOfStockCount: number;
   lowStockProducts: { id: string; name: string; qty: number; threshold: number }[];
   // Top selling product (this month)
   topProduct: { id: string; name: string; qty: number; profit: number } | null;
+  // Inventory
+  totalProducts: number;
+  stockValue: number;            // sum of (inventory qty × product.purchasePrice)
 };
 
 export async function getDashboardStats(): Promise<DashboardStats> {
@@ -1824,6 +1909,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const [
     todaySalesArr, monthSalesArr, lastMonthSalesArr, yesterdaySalesArr,
     monthExpensesArr, monthDamagesArr,
+    todayExpensesArr, todayDamagesArr,
+    lastMonthExpensesArr, lastMonthDamagesArr,
     allCredits, allSuppliers, allInventory, allProducts,
   ] = await Promise.all([
     getSalesForDate(today),
@@ -1832,6 +1919,10 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     getSalesForDate(yesterday),
     getExpensesForDateRange(thisMonthStart, thisMonthEnd),
     getDamagesForDateRange(thisMonthStart, thisMonthEnd),
+    getExpensesForDateRange(today, today),
+    getDamagesForDate(today),
+    getExpensesForDateRange(lastMonthStart, lastMonthEnd),
+    getDamagesForDateRange(lastMonthStart, lastMonthEnd),
     getActiveCredits(),
     getAllSuppliers(),
     getAllInventory(),
@@ -1844,6 +1935,22 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const monthExpenses = monthExpensesArr.reduce((a, e) => a + e.amount, 0);
   const monthDamageCost = monthDamagesArr.reduce((a, d) => a + d.totalCost, 0);
   const netProfit = grossProfit - monthExpenses - monthDamageCost;
+
+  // Today net profit (today gross - today expenses - today damage)
+  const todayExpenses = todayExpensesArr.reduce((a, e) => a + e.amount, 0);
+  const todayDamageCost = todayDamagesArr.reduce((a, d) => a + d.totalCost, 0);
+
+  // Yesterday net profit (yesterday gross - yesterday expenses - yesterday damage)
+  const yesterdayExpenses = yesterdaySalesArr.length > 0
+    ? (await getExpensesForDateRange(yesterday, yesterday)).reduce((a, e) => a + e.amount, 0)
+    : 0;
+  const yesterdayDamageCost = yesterdaySalesArr.length > 0
+    ? (await getDamagesForDate(yesterday)).reduce((a, d) => a + d.totalCost, 0)
+    : 0;
+
+  // Last month net profit
+  const lastMonthExpenses = lastMonthExpensesArr.reduce((a, e) => a + e.amount, 0);
+  const lastMonthDamageCost = lastMonthDamagesArr.reduce((a, d) => a + d.totalCost, 0);
 
   // Cash available: total money received from sales this month minus expenses paid out.
   // (Sales revenue is treated as cash received at point of sale.)
@@ -1898,6 +2005,9 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     }
   }
 
+  // Stock value (sum of inventory qty × purchase price)
+  const stockValue = allProducts.reduce((a, p) => a + (allInventory[p.id] || 0) * p.purchasePrice, 0);
+
   return {
     cashAvailable,
     grossProfit,
@@ -1906,6 +2016,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     customerDue,
     todaySales,
     todayProfit,
+    todayNetProfit: todayProfit - todayExpenses - todayDamageCost,
     todayItems,
     monthSales,
     monthProfit,
@@ -1913,10 +2024,14 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     monthDamageCost,
     monthNetProfit: netProfit,
     yesterdayProfit,
+    yesterdayNetProfit: yesterdayProfit - yesterdayExpenses - yesterdayDamageCost,
     lastMonthProfit,
+    lastMonthNetProfit: lastMonthProfit - lastMonthExpenses - lastMonthDamageCost,
     lowStockCount,
     outOfStockCount,
     lowStockProducts,
     topProduct,
+    totalProducts: allProducts.length,
+    stockValue,
   };
 }

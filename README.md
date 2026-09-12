@@ -308,6 +308,7 @@ Repository: [github.com/dumzvybez/Egg-Shop-Management-App](https://github.com/du
   </tr>
 </table>
 
+> Replace the placeholder images above with real screenshots of your deployed app.
 
 ---
 

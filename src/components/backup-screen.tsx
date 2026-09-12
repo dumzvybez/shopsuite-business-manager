@@ -1,15 +1,21 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { ArrowLeft, Download, Upload, AlertTriangle, Check, Clock, RefreshCw, DatabaseBackup, Trash2 } from 'lucide-react';
+import { ArrowLeft, Download, Upload, AlertTriangle, Check, Clock, RefreshCw, DatabaseBackup, Trash2, Lock } from 'lucide-react';
 import {
   exportBackup, importBackup, saveSettings, useI18n,
   saveAutoBackup, listAutoBackups, restoreAutoBackup, deleteAutoBackup,
+  getSettings,
 } from '@/lib/data-hooks-adapter';
 import { useAppToast } from './toast-provider';
 import { getSalesForDateRange, getDayRecordsForRange, getPriceSessionsForDateRange, getActiveCredits } from '@/lib/db';
 import { formatDate } from '@/lib/sinhala';
+import { PinVerifyDialog } from './app-lock';
+import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogFooter,
+  AlertDialogTitle, AlertDialogDescription, AlertDialogAction, AlertDialogCancel,
+} from '@/components/ui/alert-dialog';
 
 type Props = {
   onBack: () => void;
@@ -24,14 +30,21 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState<{ sales: number; days: number; sessions: number; credits: number } | null>(null);
   const [autoBackups, setAutoBackups] = useState<{ id: string; at: number }[]>([]);
+  // Confirmation dialog state (replaces browser confirm())
+  const [confirmDialog, setConfirmDialog] = useState<{ title: string; desc: string; onConfirm: () => void } | null>(null);
+  // PIN auth dialog state (for restore when app lock is enabled)
+  const [showPinAuth, setShowPinAuth] = useState(false);
+  const [pinAuthAction, setPinAuthAction] = useState<(() => void) | null>(null);
+  const [appLockActive, setAppLockActive] = useState(false);
 
-  const refreshStats = async () => {
-    const [allSales, allDays, allSessions, allCredits, allBackups] = await Promise.all([
+  const refreshStats = useCallback(async () => {
+    const [allSales, allDays, allSessions, allCredits, allBackups, s] = await Promise.all([
       getSalesForDateRange('1900-01-01', '2999-12-31'),
       getDayRecordsForRange('1900-01-01', '2999-12-31'),
       getPriceSessionsForDateRange('1900-01-01', '2999-12-31'),
       getActiveCredits(),
       listAutoBackups(),
+      getSettings(),
     ]);
     setStats({
       sales: allSales.length,
@@ -40,10 +53,12 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
       credits: allCredits.length,
     });
     setAutoBackups(allBackups);
-  };
+    setAppLockActive(!!s.appLockEnabled && !!s.appLockPin);
+  }, []);
 
-  useEffect(() => { refreshStats(); }, []);
+  useEffect(() => { refreshStats(); }, [refreshStats]);
 
+  // ─── Export ───
   const handleExport = async () => {
     setBusy(true);
     try {
@@ -52,7 +67,7 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `shop-manager-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `shopsuite-backup-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
       await saveSettings({ lastBackupAt: Date.now() });
@@ -63,7 +78,7 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
       const file = new File([blob], a.download, { type: 'application/json' });
       if (navigator.canShare?.({ files: [file] })) {
         try {
-          await navigator.share({ files: [file], title: 'Shop Manager Backup', text: t('backup.title') });
+          await navigator.share({ files: [file], title: 'ShopSuite Backup', text: t('backup.title') });
         } catch { /* cancelled */ }
       }
     } catch (e: any) {
@@ -73,6 +88,7 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
     }
   };
 
+  // ─── Create auto backup ───
   const handleCreateAutoBackup = async () => {
     setBusy(true);
     try {
@@ -86,8 +102,8 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
     }
   };
 
-  const handleRestoreAuto = async (id: string) => {
-    if (!confirm(t('backup.importConfirm'))) return;
+  // ─── Restore auto backup ───
+  const performRestoreAuto = useCallback(async (id: string) => {
     setBusy(true);
     try {
       await restoreAutoBackup(id);
@@ -99,16 +115,37 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
     } finally {
       setBusy(false);
     }
-  };
+  }, [refreshStats, onChanged, toast, t]);
 
-  const handleDeleteAuto = async (id: string) => {
-    await deleteAutoBackup(id);
-    await refreshStats();
-    toast({ title: t('toast.saved'), variant: 'success' });
-  };
+  const handleRestoreAuto = useCallback((id: string) => {
+    const doRestore = () => performRestoreAuto(id);
+    if (appLockActive) {
+      setPinAuthAction(() => doRestore);
+      setShowPinAuth(true);
+    } else {
+      setConfirmDialog({
+        title: t('backup.importConfirm'),
+        desc: t('backup.importWarning'),
+        onConfirm: doRestore,
+      });
+    }
+  }, [appLockActive, performRestoreAuto, t]);
 
-  const handleImport = async (file: File) => {
-    if (!confirm(t('backup.importConfirm'))) return;
+  // ─── Delete auto backup ───
+  const handleDeleteAuto = useCallback((id: string) => {
+    setConfirmDialog({
+      title: t('common.delete') + '?',
+      desc: 'Delete this automatic backup? This cannot be undone.',
+      onConfirm: async () => {
+        await deleteAutoBackup(id);
+        await refreshStats();
+        toast({ title: t('toast.saved'), variant: 'success' });
+      },
+    });
+  }, [refreshStats, toast, t]);
+
+  // ─── Import file ───
+  const performImport = useCallback(async (file: File) => {
     setBusy(true);
     try {
       const text = await file.text();
@@ -121,7 +158,35 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
     } finally {
       setBusy(false);
     }
-  };
+  }, [refreshStats, onChanged, toast, t]);
+
+  const handleImportFile = useCallback((file: File) => {
+    const doImport = () => performImport(file);
+    if (appLockActive) {
+      setPinAuthAction(() => doImport);
+      setShowPinAuth(true);
+    } else {
+      setConfirmDialog({
+        title: t('backup.importConfirm'),
+        desc: t('backup.importWarning'),
+        onConfirm: doImport,
+      });
+    }
+  }, [appLockActive, performImport, t]);
+
+  // ─── PIN auth success ───
+  const handlePinAuthSuccess = useCallback(() => {
+    setShowPinAuth(false);
+    if (pinAuthAction) {
+      // Still show the confirmation dialog after PIN auth
+      setConfirmDialog({
+        title: t('backup.importConfirm'),
+        desc: t('backup.importWarning'),
+        onConfirm: pinAuthAction,
+      });
+      setPinAuthAction(null);
+    }
+  }, [pinAuthAction, t]);
 
   return (
     <div className="app-shell pb-28">
@@ -149,6 +214,21 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
       </header>
 
       <main className="px-4 py-4 space-y-4 max-w-2xl mx-auto w-full">
+        {/* Security warning if App Lock is active */}
+        {appLockActive && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="glass rounded-2xl p-3 flex items-start gap-2 border border-amber-300/50"
+          >
+            <Lock size={14} className="text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+            <p className="text-[11px] text-amber-800 dark:text-amber-200">
+              App Lock is enabled. Restoring or importing a backup requires PIN verification.
+              Backup files do not contain your PIN — you will need to re-set App Lock after restoring on a new device.
+            </p>
+          </motion.div>
+        )}
+
         {/* Data status */}
         <motion.section
           initial={{ opacity: 0, y: 8 }}
@@ -211,7 +291,9 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
               </>
             )}
           </button>
-          <p className="text-[11px] text-stone-500 dark:text-amber-100/60 mt-2">{t('backup.exportTip')}</p>
+          <p className="text-[11px] text-stone-500 dark:text-amber-100/60 mt-2">
+            Includes all products, sales, suppliers, credit, expenses and history. Your PIN is NOT included — backup files are not password-protected.
+          </p>
         </motion.section>
 
         {/* Import */}
@@ -244,7 +326,7 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
             accept="application/json,.json"
             onChange={(e) => {
               const f = e.target.files?.[0];
-              if (f) handleImport(f);
+              if (f) handleImportFile(f);
               e.target.value = '';
             }}
             className="hidden"
@@ -319,6 +401,12 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
               ))}
             </div>
           )}
+          <div className="glass rounded-xl p-2.5 mt-3 flex items-start gap-2">
+            <DatabaseBackup size={12} className="text-stone-500 flex-shrink-0 mt-0.5" />
+            <p className="text-[10px] text-stone-600 dark:text-amber-100/70">
+              Auto backups are stored in this browser's IndexedDB (on this device only). They are not encrypted. The latest 5 are kept; older ones are removed automatically.
+            </p>
+          </div>
         </motion.section>
 
         {/* Info */}
@@ -339,6 +427,41 @@ export function BackupScreen({ onBack, settings, onChanged }: Props) {
           </div>
         </motion.div>
       </main>
+
+      {/* ─── Confirmation dialog (replaces browser confirm) ─── */}
+      <AlertDialog open={!!confirmDialog} onOpenChange={(o) => !o && setConfirmDialog(null)}>
+        <AlertDialogContent className="max-w-sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle size={18} className="text-amber-500" />
+              {confirmDialog?.title}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmDialog?.desc}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction
+              onClick={() => {
+                confirmDialog?.onConfirm();
+                setConfirmDialog(null);
+              }}
+              className="glass-danger text-white"
+            >
+              {t('common.confirm')}
+            </AlertDialogAction>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ─── PIN auth dialog (for restore when App Lock is enabled) ─── */}
+      <PinVerifyDialog
+        open={showPinAuth}
+        onClose={() => { setShowPinAuth(false); setPinAuthAction(null); }}
+        onVerified={handlePinAuthSuccess}
+        title="Enter PIN to Restore"
+      />
     </div>
   );
 }

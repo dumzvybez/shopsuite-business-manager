@@ -29,7 +29,7 @@ export {
   getAllStockMovements, getStockMovementsForCategory, getStockMovementsForProduct,
   todayStr, toDateStr, addDays, genId, PRODUCT_COLOR_PALETTE,
   formatDate, formatDateShort, formatDateLong, formatMonth,
-  formatNumber, formatCurrency, relativeDayLabel,
+  formatNumber, formatQuantity, formatQuantityWithUnit, formatCurrency, relativeDayLabel,
 } from './data-hooks';
 
 export type {
